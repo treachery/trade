@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>股票策略回测平台</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>股票策略回测平台 <span class="sub">可组合的入场/出场策略库</span></h1>
+  </header>
+
+  <main>
+    <aside class="panel">
+      <h2>回测设置</h2>
+
+      <label>股票/指数代码
+        <input id="symbol" type="text" value="sh000300" placeholder="如 sh000300 / 600519" />
+      </label>
+      <div class="hint">指数加 sh/sz 前缀：sh000300 沪深300 / sh000001 上证指数 / sz399001 深证成指 / sz399006 创业板指。个股直接6位：600519 茅台<br>PE仓位支持：沪深300/上证50/上证180/上证380/中证500/中证1000/创业板50；创业板指(399006)用创业板50的PE代理；上证指数/深证成指无PE源(退化满仓)</div>
+
+      <div class="row">
+        <label>开始日期<input id="start" type="date" /></label>
+        <label>结束日期<input id="end" type="date" /></label>
+      </div>
+
+      <div class="row">
+        <label>复权
+          <select id="adjust">
+            <option value="qfq" selected>前复权</option>
+            <option value="hfq">后复权</option>
+            <option value="">不复权</option>
+          </select>
+        </label>
+        <label>初始资金<input id="capital" type="number" value="100000" step="10000" /></label>
+      </div>
+
+      <label>手续费率
+        <input id="commission" type="number" value="0.0005" step="0.0001" />
+      </label>
+      <div class="hint">默认 0.0005（万5）</div>
+
+      <label>融资年化利率
+        <input id="marginRate" type="number" value="0.0699" step="0.0001" />
+      </label>
+      <div class="hint">默认 0.0699（东方财富标准融资利率6.99%）；仓位>1的融资部分按此利率按日计息</div>
+
+      <h2>仓位管理</h2>
+      <label>入场仓位策略
+        <select id="posType">
+          <option value="pe_percentile" selected>PE百分位（便宜多买，可融资）</option>
+          <option value="fixed">固定仓位</option>
+        </select>
+      </label>
+      <div class="hint">PE百分位：仓位=(1−PE百分位)×2，并钳制到[最低,最高]区间。最便宜时2倍(含融资)、最贵时0.5倍。仅支持的指数有PE，个股退化为满仓</div>
+      <div class="row">
+        <label>最高仓位<input id="posMaxLev" type="number" value="2" step="0.1" min="1" /></label>
+        <label>最低仓位<input id="posMinLev" type="number" value="0.5" step="0.1" min="0" /></label>
+      </div>
+      <label>PE上升卸杠杆步长(百分位点)
+        <input id="posDelevStep" type="number" value="10" step="1" min="0" />
+      </label>
+      <div class="hint">持仓中PE百分位每上升此点数(默认10)就按新仓位减仓卸杠杆；填0关闭</div>
+      <label>固定仓位<input id="posFixed" type="number" value="1" step="0.1" min="0" /></label>
+
+      <h2>入场策略 <span class="logic-toggle">
+        <label><input type="radio" name="entryLogic" value="or" checked> 任一(OR)</label>
+        <label><input type="radio" name="entryLogic" value="and"> 同时(AND)</label>
+      </span></h2>
+
+      <div class="strat" data-type="ma_golden">
+        <label class="checkbox"><input type="checkbox" class="strat-on" checked> 双均线金叉</label>
+        <div class="params">快线MA<input class="p" data-k="fast" type="number" value="50"> 慢线MA<input class="p" data-k="slow" type="number" value="200"></div>
+      </div>
+      <div class="strat" data-type="donchian_breakout">
+        <label class="checkbox"><input type="checkbox" class="strat-on" checked> 唐奇安突破(创N日新高)</label>
+        <div class="params">N<input class="p" data-k="period" type="number" value="20"></div>
+      </div>
+      <div class="strat" data-type="ma_bull_stack">
+        <label class="checkbox"><input type="checkbox" class="strat-on"> 均线多头排列</label>
+        <div class="params">周期<input class="p" data-k="periods" type="text" value="5,10,20,60"></div>
+      </div>
+      <div class="strat" data-type="macd_golden">
+        <label class="checkbox"><input type="checkbox" class="strat-on"> MACD零轴上金叉</label>
+        <div class="params">快<input class="p" data-k="fast" type="number" value="12"> 慢<input class="p" data-k="slow" type="number" value="26"> 信号<input class="p" data-k="signal" type="number" value="9"></div>
+      </div>
+      <div class="strat" data-type="volume_breakout">
+        <label class="checkbox"><input type="checkbox" class="strat-on"> 量价突破(创N日新高+放量)</label>
+        <div class="params">N<input class="p" data-k="period" type="number" value="20"> 量倍<input class="p" data-k="vol_mult" type="number" value="1.5" step="0.1"></div>
+      </div>
+
+      <h2>出场策略 <span class="logic-toggle">
+        <label><input type="radio" name="exitLogic" value="or"> 任一(OR)</label>
+        <label><input type="radio" name="exitLogic" value="and" checked> 同时(AND)</label>
+      </span></h2>
+
+      <div class="strat" data-type="ma_break">
+        <label class="checkbox"><input type="checkbox" class="strat-on" checked> 跌破均线</label>
+        <div class="params">MA<input class="p" data-k="period" type="number" value="20"></div>
+      </div>
+      <div class="strat" data-type="chandelier_atr">
+        <label class="checkbox"><input type="checkbox" class="strat-on"> 吊灯ATR止损</label>
+        <div class="params">ATR周期<input class="p" data-k="atr_period" type="number" value="22"> 倍数<input class="p" data-k="mult" type="number" value="3" step="0.5"></div>
+      </div>
+      <div class="strat" data-type="trailing_pct">
+        <label class="checkbox"><input type="checkbox" class="strat-on"> 移动止盈(回撤%)</label>
+        <div class="params">回撤%<input class="p" data-k="pct" type="number" value="10" step="1"></div>
+      </div>
+      <div class="strat" data-type="donchian_exit">
+        <label class="checkbox"><input type="checkbox" class="strat-on"> 唐奇安下轨(创N日新低)</label>
+        <div class="params">N<input class="p" data-k="period" type="number" value="10"></div>
+      </div>
+      <div class="strat" data-type="ma_death_cross">
+        <label class="checkbox"><input type="checkbox" class="strat-on" checked> 双均线死叉</label>
+        <div class="params">快线MA<input class="p" data-k="fast" type="number" value="50"> 慢线MA<input class="p" data-k="slow" type="number" value="200"></div>
+      </div>
+
+      <button id="runBtn">运行回测</button>
+      <button id="optBtn" class="opt-btn">⚡ 一键寻优（跑全部3249组合）</button>
+      <div class="hint">用上方选定的"日期/标的"跑全部组合，按基金式综合评分排Top10</div>
+      <div id="status" class="status"></div>
+    </aside>
+
+    <section class="content">
+      <div id="regimeWrap" class="regime-wrap"></div>
+      <div id="optWrap" class="opt-wrap" style="display:none"></div>
+      <div id="stats" class="stats"></div>
+      <div id="kchart" class="chart"></div>
+      <div id="echart" class="chart"></div>
+      <div id="tradesWrap" class="trades-wrap">
+        <h2>交易明细</h2>
+        <table id="trades">
+          <thead>
+            <tr>
+              <th>#</th><th>买入日期</th><th>买入价</th><th>买入金额</th><th>仓位</th><th>融资利息</th><th>手续费</th><th>卖出日期</th><th>卖出价</th><th>卖出金额</th>
+              <th>盈亏金额</th><th>收益%</th><th>持有(交易日)</th><th>卖出原因</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

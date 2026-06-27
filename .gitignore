@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 本地数据缓存（行情/PE，会自动重新拉取，无需入库）
+data_cache/*.csv
+
+# 部署临时目录
+_deploy/
+
+# IDE / 工具
+.codebuddy/
+.idea/
+.vscode/
+.DS_Store
+
+# 日志
+*.log
