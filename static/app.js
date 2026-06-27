@@ -170,12 +170,63 @@ function renderTrades(trades) {
   });
 }
 
+// ===== 请求缓存：参数未变则不重复请求后端，用本地数据重新渲染（带1s载入动效）=====
+const _cache = { backtest: null, optimize: {} };  // optimize 按 symbol+start+end 缓存
+function _payloadKey(p) { return JSON.stringify(p); }
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// 判断是否被限流，弹窗提示
+function _handleRateLimit(data) {
+  if (data && data.rate_limited) {
+    showModal("请求被限流", data.error || "请求过于频繁，请稍后再试。");
+    return true;
+  }
+  return false;
+}
+
+// 通用弹窗
+function showModal(title, body) {
+  let m = document.getElementById("globalModal");
+  if (!m) {
+    m = document.createElement("div");
+    m.id = "globalModal";
+    m.className = "modal-mask";
+    m.innerHTML = `<div class="modal-box">
+        <div class="modal-title"></div>
+        <div class="modal-body"></div>
+        <div class="modal-foot"><button class="modal-ok">知道了</button></div>
+      </div>`;
+    document.body.appendChild(m);
+    m.querySelector(".modal-ok").addEventListener("click", () => m.style.display = "none");
+    m.addEventListener("click", (e) => { if (e.target === m) m.style.display = "none"; });
+  }
+  m.querySelector(".modal-title").textContent = title;
+  m.querySelector(".modal-body").innerHTML = body;
+  m.style.display = "flex";
+}
+
+// 载入遮罩（1秒动效，避免用户以为是假数据）
+function _showLoading(text) {
+  let m = document.getElementById("loadingMask");
+  if (!m) {
+    m = document.createElement("div");
+    m.id = "loadingMask";
+    m.className = "loading-mask";
+    m.innerHTML = `<div class="loading-box"><div class="loading-spin"></div><div class="loading-text"></div></div>`;
+    document.body.appendChild(m);
+  }
+  m.querySelector(".loading-text").textContent = text || "处理中…";
+  m.style.display = "flex";
+}
+function _hideLoading() {
+  const m = document.getElementById("loadingMask");
+  if (m) m.style.display = "none";
+}
+
 async function runBacktest() {
   const btn = $("runBtn");
   const status = $("status");
   btn.disabled = true;
-  status.className = "status";
-  status.textContent = "拉取数据并回测中…（首次拉取某只股票可能需几秒）";
 
   const panels = document.querySelector(".panel");
   const allStrats = Array.from(panels.querySelectorAll(".strat"));
@@ -217,6 +268,29 @@ async function runBacktest() {
     }
   };
 
+  const pkey = _payloadKey(payload);
+
+  // 参数未变 → 用缓存渲染（仍带1s载入动效，避免假数据观感）
+  if (_cache.backtest && _cache.backtest.key === pkey) {
+    status.className = "status";
+    status.textContent = "参数未变，使用上次结果重新渲染…";
+    _showLoading("参数未变，加载上次结果…");
+    await _sleep(1000);
+    _hideLoading();
+    const data = _cache.backtest.data;
+    renderStats(data.stats);
+    renderKChart(data);
+    renderEquityChart(data);
+    renderTrades(data.trades);
+    status.textContent = `完成（缓存）：${data.meta.symbol}，共 ${data.meta.rows} 个交易日，${data.stats.num_trades} 笔交易。`;
+    btn.disabled = false;
+    return;
+  }
+
+  status.className = "status";
+  status.textContent = "拉取数据并回测中…（首次拉取某只股票可能需几秒）";
+  _showLoading("拉取数据并回测中…");
+
   try {
     const res = await fetch("/api/backtest", {
       method: "POST",
@@ -224,11 +298,19 @@ async function runBacktest() {
       body: JSON.stringify(payload)
     });
     const data = await res.json();
+    await _sleep(1000);  // 至少1秒载入动效
+    _hideLoading();
+    if (_handleRateLimit(data)) {
+      status.className = "status error";
+      status.textContent = "已被限流";
+      return;
+    }
     if (!data.ok) {
       status.className = "status error";
       status.textContent = "错误：" + (data.error || "未知错误");
       return;
     }
+    _cache.backtest = { key: pkey, data };
     renderStats(data.stats);
     renderKChart(data);
     renderEquityChart(data);
@@ -249,6 +331,7 @@ async function runBacktest() {
       status.textContent = `完成：${data.meta.symbol}，共 ${data.meta.rows} 个交易日，${data.stats.num_trades} 笔交易${peNote}。`;
     }
   } catch (e) {
+    _hideLoading();
     status.className = "status error";
     status.textContent = "请求失败：" + e.message;
   } finally {
@@ -332,20 +415,46 @@ async function runOptimize() {
     top_n: 10,
     min_trades: 10,
   };
+  const okey = `${payload.symbol}|${payload.start}|${payload.end}|${payload.adjust}|${payload.commission}`;
+
+  // 参数未变 → 用缓存渲染
+  if (_cache.optimize[okey]) {
+    status.textContent = "参数未变，使用上次寻优结果重新渲染…";
+    _showLoading("参数未变，加载上次结果…");
+    await _sleep(1000);
+    _hideLoading();
+    const data = _cache.optimize[okey];
+    renderOpt(data);
+    status.textContent = `寻优完成（缓存）：${data.meta.symbol} ${data.meta.start}~${data.meta.end}，已排出Top10。`;
+    btn.disabled = false;
+    $("runBtn").disabled = false;
+    return;
+  }
+
+  _showLoading("正在跑全部 3249 个组合…");
   try {
     const res = await fetch("/api/optimize", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
     const data = await res.json();
+    await _sleep(1000);
+    _hideLoading();
+    if (_handleRateLimit(data)) {
+      status.className = "status error";
+      status.textContent = "已被限流";
+      return;
+    }
     if (!data.ok) {
       status.className = "status error";
       status.textContent = "寻优失败：" + (data.error || "未知错误");
       return;
     }
+    _cache.optimize[okey] = data;
     renderOpt(data);
     status.textContent = `寻优完成：${data.meta.symbol} ${data.meta.start}~${data.meta.end}，已排出Top10（点"载入"看图）。`;
   } catch (e) {
+    _hideLoading();
     status.className = "status error";
     status.textContent = "请求失败：" + e.message;
   } finally {
@@ -389,25 +498,36 @@ async function runRegimes() {
   const symbol = $("symbol").value.trim();
   if (btn) { btn.disabled = true; btn.textContent = "正在跑三种市场环境（每种3249组合，约十几秒）…"; }
 
+  _showLoading("正在跑三种市场环境最佳策略…");
   const results = [];
   for (const reg of REGIMES) {
-    try {
-      const res = await fetch("/api/optimize", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          symbol, start: reg.start, end: reg.end,
-          adjust: $("adjust").value,
-          initial_capital: parseFloat($("capital").value),
-          commission: parseFloat($("commission").value),
-          top_n: 1, min_trades: 5,
-        })
-      });
-      const data = await res.json();
-      results.push({ reg, data });
-    } catch (e) {
-      results.push({ reg, data: { ok: false, error: e.message } });
+    const okey = `${symbol}|${reg.start}|${reg.end}|${$("adjust").value}|${$("commission").value}`;
+    let data;
+    if (_cache.optimize[okey]) {
+      data = _cache.optimize[okey];
+    } else {
+      try {
+        const res = await fetch("/api/optimize", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol, start: reg.start, end: reg.end,
+            adjust: $("adjust").value,
+            initial_capital: parseFloat($("capital").value),
+            commission: parseFloat($("commission").value),
+            top_n: 1, min_trades: 5,
+          })
+        });
+        data = await res.json();
+        if (data.ok) _cache.optimize[okey] = data;
+      } catch (e) {
+        data = { ok: false, error: e.message };
+      }
     }
+    if (_handleRateLimit(data)) { _hideLoading(); if (btn) { btn.disabled = false; btn.textContent = "重新跑"; } return; }
+    results.push({ reg, data });
   }
+  await _sleep(1000);
+  _hideLoading();
 
   const cards = results.map(({ reg, data }, idx) => {
     if (!data.ok || !data.top || !data.top.length) {
@@ -472,5 +592,81 @@ document.addEventListener("click", (e) => {
 
 $("runBtn").addEventListener("click", runBacktest);
 $("optBtn").addEventListener("click", runOptimize);
+
+// ===== 右上角反馈按钮 =====
+function initFeedback() {
+  const btn = document.createElement("button");
+  btn.id = "feedbackBtn";
+  btn.className = "feedback-btn";
+  btn.textContent = "反馈意见";
+  btn.addEventListener("click", openFeedbackModal);
+  document.body.appendChild(btn);
+}
+
+function openFeedbackModal() {
+  let m = document.getElementById("feedbackModal");
+  if (!m) {
+    m = document.createElement("div");
+    m.id = "feedbackModal";
+    m.className = "modal-mask";
+    m.innerHTML = `<div class="modal-box feedback-box">
+        <div class="modal-title">意见反馈</div>
+        <div class="modal-body">
+          <div style="margin-bottom:8px;color:#8b949e;font-size:13px">欢迎提出建议、报bug或功能需求，提交后会同步到 GitHub Issue。</div>
+          <textarea id="fbText" class="fb-text" placeholder="请描述你的反馈…" rows="5"></textarea>
+          <input id="fbContact" class="fb-contact" placeholder="联系方式（选填，如邮箱/微信）" />
+        </div>
+        <div class="modal-foot">
+          <button class="fb-cancel">取消</button>
+          <button class="fb-submit modal-ok">提交反馈</button>
+        </div>
+      </div>`;
+    document.body.appendChild(m);
+    m.querySelector(".fb-cancel").addEventListener("click", () => m.style.display = "none");
+    m.addEventListener("click", (e) => { if (e.target === m) m.style.display = "none"; });
+    m.querySelector(".fb-submit").addEventListener("click", submitFeedback);
+  }
+  m.style.display = "flex";
+}
+
+async function submitFeedback() {
+  const text = $("fbText").value.trim();
+  const contact = $("fbContact").value.trim();
+  if (!text) { alert("请填写反馈内容"); return; }
+  const m = $("feedbackModal");
+  const submitBtn = m.querySelector(".fb-submit");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "提交中…";
+  _showLoading("正在提交反馈…");
+  try {
+    const res = await fetch("/api/feedback", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, contact })
+    });
+    const data = await res.json();
+    await _sleep(1000);
+    _hideLoading();
+    if (_handleRateLimit(data)) { submitBtn.disabled = false; submitBtn.textContent = "提交反馈"; return; }
+    if (!data.ok) {
+      showModal("提交失败", data.error || "未知错误");
+    } else {
+      m.style.display = "none";
+      const msg = data.issue_url
+        ? `反馈已提交！GitHub Issue：<a href="${data.issue_url}" target="_blank" style="color:#58a6ff">${data.issue_url}</a>`
+        : (data.note || "反馈已收到，感谢！");
+      showModal("提交成功", msg);
+      $("fbText").value = "";
+      $("fbContact").value = "";
+    }
+  } catch (e) {
+    _hideLoading();
+    showModal("提交失败", e.message);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "提交反馈";
+  }
+}
+
+initFeedback();
 // 首次自动跑一次默认示例
 runBacktest();

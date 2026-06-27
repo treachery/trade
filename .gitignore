@@ -20,3 +20,9 @@ _deploy/
 
 # 日志
 *.log
+
+# 敏感信息（token / 密钥，绝不入库）
+.env
+.env.*
+*.token
+secrets/

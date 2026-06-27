@@ -2,7 +2,7 @@
 
 一个轻量、自用的 **A 股 / 指数** 策略回测平台：在线选标的与区间 → 自由组合多种入场/出场策略 → 在 K 线图上标注买卖点 → 给出总回报、夏普、卡玛、最大回撤等绩效。支持 **一键寻优（3249 组合）**、**PE 估值仓位管理（含融资杠杆 + 按日计息）** 与 **PE 上升逐步卸杠杆**。
 
-> 在线体验：`http://49.233.175.122:5000`（部署在腾讯云轻量服务器）
+> 在线体验：**http://49.233.175.122**（部署在腾讯云轻量服务器，Nginx + gunicorn + Docker）
 
 技术栈：**akshare（免费 A 股/指数数据）+ 自研逐日回测引擎 + Flask + ECharts**。
 
@@ -64,9 +64,33 @@ python app.py        # 或双击 run.bat
 - 概要卡片：总回报、年化、超额、夏普、卡玛、最大回撤、胜率、融资利息、交易手续费、卸杠杆次数等。
 - 逐笔明细表：买卖日期价格、**仓位、买入/卖出金额、融资利息、手续费、盈亏金额、收益%**，卸杠杆减仓作为可折叠子行展示；按时间从近到远排序。
 
+### 6. 帮助页面与用户反馈
+
+- 标题旁 **「?」** 链接到独立帮助页面，图文说明平台用法。
+- 右上角 **「反馈意见」** 按钮：用户提交意见后自动在 GitHub 创建 Issue（需配置 `GITHUB_TOKEN`），并记录来源 IP 与归属地。
+
 ---
 
-## 支持的标的
+## 性能优化
+
+### 服务端 LRU 缓存 + 启动预热
+
+- 回测/寻优结果按参数缓存（最多 100 组，LRU 淘汰），相同参数再次请求直接返回，不重新计算。
+- **启动预热**：服务启动后在后台异步预热 5 组默认数据（默认回测 + 一键寻优 + 牛/熊/牛熊三段），新用户打开页面即秒出。
+- 缓存命中不计入限流。
+
+### 客户端缓存 + 载入动效
+
+- 运行回测 / 一键寻优 / 市场环境最佳策略 时，若参数未变则不重复请求后端，直接用上次结果渲染（带 1 秒载入动效，避免假数据观感）。
+
+### Nginx 反向代理 + gzip 压缩
+
+- Nginx 监听 80 端口代理到 gunicorn(5000)，开启 gzip 压缩（266KB JSON → 86KB），大幅减少公网传输。
+- 正确传递客户端真实 IP（`X-Real-IP`），支持 Cloudflare（`CF-Connecting-IP`）。
+
+### IP 限流
+
+- 同一 IP 多窗口限流：每秒 1 次 / 每分钟 10 次 / 每小时 100 次 / 每天 1000 次，超限返回 429 并弹窗提示。
 
 - **个股**：直接 6 位代码，如 `600519`（贵州茅台）。
 - **指数**：加 `sh`/`sz` 前缀，如 `sh000300` 沪深300 / `sh000001` 上证指数 / `sz399001` 深证成指 / `sz399006` 创业板指。
@@ -87,12 +111,14 @@ python app.py        # 或双击 run.bat
 
 ```
 trade/
-├── app.py                 # Flask 入口：/api/backtest、/api/optimize
+├── app.py                 # Flask 入口：/api/backtest、/api/optimize、/api/feedback + 限流 + 缓存 + 预热
 ├── backtest/
 │   ├── data.py            # akshare 行情/PE 拉取 + CSV 缓存 + 自动增量更新
 │   ├── strategy.py        # 策略配置（入场/出场/逻辑/仓位）
 │   └── engine.py          # 逐日回测引擎 + 指标库 + 批量寻优 + 绩效
-├── templates/index.html   # 前端页面
+├── templates/
+│   ├── index.html         # 前端页面
+│   └── help.html          # 使用帮助页面
 ├── static/{app.js,style.css}
 ├── scripts/               # 命令行验证/诊断脚本
 ├── data_cache/            # 行情/PE 缓存（自动生成，已 gitignore）
@@ -102,19 +128,54 @@ trade/
 
 ---
 
-## 部署（Docker / 腾讯云轻量服务器）
+## 部署（Docker + Nginx / 腾讯云轻量服务器）
+
+### 1. 构建 Docker 镜像
 
 ```bash
-# 构建镜像
 docker build -t trade:latest .
+```
 
-# 运行（映射 5000 端口，挂载持久化缓存，崩溃/重启自动拉起）
+### 2. 运行容器（仅监听本机 5000，由 Nginx 反代）
+
+```bash
 docker run -d --name trade --restart unless-stopped \
-  -p 5000:5000 -v /root/trade_data_cache:/app/data_cache trade:latest
+  -p 127.0.0.1:5000:5000 \
+  -v /root/trade_data_cache:/app/data_cache \
+  -e GITHUB_TOKEN='你的fine-grained PAT（Issues读写权限）' \
+  -e GITHUB_REPO='treachery/trade' \
+  trade:latest
 ```
 
 - 生产用 `gunicorn` 运行（见 Dockerfile），通过环境变量 `HOST/PORT/DEBUG` 控制。
+- `GITHUB_TOKEN`：用于反馈功能自动创建 Issue（fine-grained PAT，仅授权目标仓库的 Issues 读写）。**切勿将 token 写入代码或提交到 git**（`.gitignore` 已排除 `.env`/`*.token`）。
+- 缓存目录挂载到宿主机，重启不丢已拉取的行情/PE 数据。
+
+### 3. Nginx 反向代理（80 端口 + gzip + 真实 IP）
+
+```nginx
+server {
+    listen 80;
+    server_name _;
+    # 如使用 Cloudflare，取消下行注释以获取真实访客IP
+    # set_real_ip_from <cloudflare-ip-ranges>;
+    # real_ip_header CF-Connecting-IP;
+
+    gzip on;
+    gzip_types application/json text/css application/javascript;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 120s;
+    }
+}
+```
+
 - 国内服务器拉取镜像建议配置 Docker 镜像加速器（如 `mirror.ccs.tencentyun.com`）。
+- 防火墙仅开放 80（HTTP）和 22（SSH），5000 端口不对外暴露。
 
 > ⚠️ 默认无登录鉴权，公网部署请用防火墙限制来源 IP 或自行加访问口令。
 
@@ -148,8 +209,10 @@ docker run -d --name trade --restart unless-stopped \
 
 ## 后续可扩展
 
+- ~~参数网格寻优（均线周期、ATR 倍数、唐奇安 N 等）~~ ✅ 已实现（一键寻优 3249 组合）
+- ~~服务端缓存 + 预热~~ ✅ 已实现
+- ~~用户反馈通道~~ ✅ 已实现（GitHub Issue）
 - 多股票批量回测 / 自选股池
-- 参数网格寻优（均线周期、ATR 倍数、唐奇安 N 等）
 - T+1、涨跌停、滑点更精细建模
 - 样本外 + 多标的稳健性检验面板
 - 用户登录与个人策略/自选保存
