@@ -457,6 +457,19 @@ $("regimeWrap").innerHTML = `<div class="regime-head">
   </div>`;
 $("regimeBtn").addEventListener("click", runRegimes);
 
+// 字段说明问号：点击切换对应 .hint 的显示
+document.addEventListener("click", (e) => {
+  const tip = e.target.closest(".q-tip");
+  if (!tip) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const el = document.getElementById(tip.dataset.target);
+  if (el) {
+    el.hidden = !el.hidden;
+    tip.classList.toggle("active", !el.hidden);
+  }
+});
+
 $("runBtn").addEventListener("click", runBacktest);
 $("optBtn").addEventListener("click", runOptimize);
 // 首次自动跑一次默认示例

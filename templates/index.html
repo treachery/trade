@@ -9,17 +9,17 @@
 </head>
 <body>
   <header>
-    <h1>股票策略回测平台 <span class="sub">可组合的入场/出场策略库</span></h1>
+    <h1>股票策略回测平台 <a href="/help" class="help-link" title="使用帮助" target="_blank" rel="noopener">?</a> <span class="sub">可组合的入场/出场策略库</span></h1>
   </header>
 
   <main>
     <aside class="panel">
       <h2>回测设置</h2>
 
-      <label>股票/指数代码
+      <label>股票/指数代码 <span class="q-tip" data-target="hintSymbol">?</span>
         <input id="symbol" type="text" value="sh000300" placeholder="如 sh000300 / 600519" />
       </label>
-      <div class="hint">指数加 sh/sz 前缀：sh000300 沪深300 / sh000001 上证指数 / sz399001 深证成指 / sz399006 创业板指。个股直接6位：600519 茅台<br>PE仓位支持：沪深300/上证50/上证180/上证380/中证500/中证1000/创业板50；创业板指(399006)用创业板50的PE代理；上证指数/深证成指无PE源(退化满仓)</div>
+      <div class="hint" id="hintSymbol" hidden>指数加 sh/sz 前缀：sh000300 沪深300 / sh000001 上证指数 / sz399001 深证成指 / sz399006 创业板指。个股直接6位：600519 茅台<br>PE仓位支持：沪深300/上证50/上证180/上证380/中证500/中证1000/创业板50；创业板指(399006)用创业板50的PE代理；上证指数/深证成指无PE源(退化满仓)</div>
 
       <div class="row">
         <label>开始日期<input id="start" type="date" /></label>
@@ -37,32 +37,38 @@
         <label>初始资金<input id="capital" type="number" value="100000" step="10000" /></label>
       </div>
 
-      <label>手续费率
+      <label>手续费率 <span class="q-tip" data-target="hintComm">?</span>
         <input id="commission" type="number" value="0.0005" step="0.0001" />
       </label>
-      <div class="hint">默认 0.0005（万5）</div>
+      <div class="hint" id="hintComm" hidden>默认 0.0005（万5）</div>
 
-      <label>融资年化利率
+      <label>融资年化利率 <span class="q-tip" data-target="hintMargin">?</span>
         <input id="marginRate" type="number" value="0.0699" step="0.0001" />
       </label>
-      <div class="hint">默认 0.0699（东方财富标准融资利率6.99%）；仓位>1的融资部分按此利率按日计息</div>
+      <div class="hint" id="hintMargin" hidden>默认 0.0699（东方财富标准融资利率6.99%）；仓位>1的融资部分按此利率按日计息</div>
+
+      <button id="runBtn">运行回测</button>
+      <button id="optBtn" class="opt-btn">⚡ 一键寻优（跑全部3249组合）</button>
+      <span class="q-tip" data-target="hintOpt">?</span>
+      <div class="hint" id="hintOpt" hidden>用上方选定的"日期/标的"跑全部组合，按基金式综合评分排Top10</div>
+      <div id="status" class="status"></div>
 
       <h2>仓位管理</h2>
-      <label>入场仓位策略
+      <label>入场仓位策略 <span class="q-tip" data-target="hintPos">?</span>
         <select id="posType">
           <option value="pe_percentile" selected>PE百分位（便宜多买，可融资）</option>
           <option value="fixed">固定仓位</option>
         </select>
       </label>
-      <div class="hint">PE百分位：仓位=(1−PE百分位)×2，并钳制到[最低,最高]区间。最便宜时2倍(含融资)、最贵时0.5倍。仅支持的指数有PE，个股退化为满仓</div>
+      <div class="hint" id="hintPos" hidden>PE百分位：仓位=(1−PE百分位)×2，并钳制到[最低,最高]区间。最便宜时2倍(含融资)、最贵时0.5倍。仅支持的指数有PE，个股退化为满仓</div>
       <div class="row">
         <label>最高仓位<input id="posMaxLev" type="number" value="2" step="0.1" min="1" /></label>
         <label>最低仓位<input id="posMinLev" type="number" value="0.5" step="0.1" min="0" /></label>
       </div>
-      <label>PE上升卸杠杆步长(百分位点)
+      <label>PE上升卸杠杆步长(百分位点) <span class="q-tip" data-target="hintDelev">?</span>
         <input id="posDelevStep" type="number" value="10" step="1" min="0" />
       </label>
-      <div class="hint">持仓中PE百分位每上升此点数(默认10)就按新仓位减仓卸杠杆；填0关闭</div>
+      <div class="hint" id="hintDelev" hidden>持仓中PE百分位每上升此点数(默认10)就按新仓位减仓卸杠杆；填0关闭</div>
       <label>固定仓位<input id="posFixed" type="number" value="1" step="0.1" min="0" /></label>
 
       <h2>入场策略 <span class="logic-toggle">
@@ -116,11 +122,6 @@
         <label class="checkbox"><input type="checkbox" class="strat-on" checked> 双均线死叉</label>
         <div class="params">快线MA<input class="p" data-k="fast" type="number" value="50"> 慢线MA<input class="p" data-k="slow" type="number" value="200"></div>
       </div>
-
-      <button id="runBtn">运行回测</button>
-      <button id="optBtn" class="opt-btn">⚡ 一键寻优（跑全部3249组合）</button>
-      <div class="hint">用上方选定的"日期/标的"跑全部组合，按基金式综合评分排Top10</div>
-      <div id="status" class="status"></div>
     </aside>
 
     <section class="content">

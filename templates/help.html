@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>使用帮助 · 股票策略回测平台</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #0d1117; color: #c9d1d9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.7; font-size: 15px;
+    }
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      background: #161b22; border-bottom: 1px solid #2a2f37;
+      padding: 12px 18px; display: flex; align-items: center; justify-content: space-between;
+    }
+    .topbar h1 { font-size: 17px; margin: 0; color: #58a6ff; }
+    .back-btn {
+      background: #1f6feb; color: #fff; text-decoration: none;
+      padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    }
+    .back-btn:hover { background: #388bfd; }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 24px 18px 60px; }
+    h2 {
+      font-size: 19px; color: #e6edf3; margin: 30px 0 12px;
+      padding-bottom: 8px; border-bottom: 1px solid #21262d;
+    }
+    h3 { font-size: 16px; color: #58a6ff; margin: 20px 0 8px; }
+    p { margin: 8px 0; }
+    ul, ol { margin: 8px 0; padding-left: 22px; }
+    li { margin: 5px 0; }
+    code {
+      background: #1b2027; color: #d29922; padding: 1px 6px;
+      border-radius: 4px; font-size: 13px; font-family: Consolas, Monaco, monospace;
+    }
+    .card {
+      background: #161b22; border: 1px solid #21262d; border-radius: 10px;
+      padding: 16px 18px; margin: 14px 0;
+    }
+    .card.bull { border-left: 4px solid #f85149; }
+    .card.bear { border-left: 4px solid #3fb950; }
+    .card.cycle { border-left: 4px solid #a371f7; }
+    .tag {
+      display: inline-block; padding: 1px 8px; border-radius: 4px;
+      font-size: 12px; font-weight: 600; margin-right: 6px;
+    }
+    .tag-blue { background: #1f6feb33; color: #58a6ff; }
+    .tag-green { background: #3fb95033; color: #3fb950; }
+    .tag-red { background: #f8514933; color: #f85149; }
+    .tag-orange { background: #d2992233; color: #d29922; }
+    .tag-purple { background: #a371f733; color: #a371f7; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+    th, td { border: 1px solid #21262d; padding: 8px 10px; text-align: left; }
+    th { background: #1b2027; color: #e6edf3; }
+    .note {
+      background: #1f6feb1a; border-left: 4px solid #1f6feb;
+      padding: 10px 14px; border-radius: 6px; margin: 14px 0; font-size: 14px;
+    }
+    .warn {
+      background: #d299221a; border-left: 4px solid #d29922;
+      padding: 10px 14px; border-radius: 6px; margin: 14px 0; font-size: 14px;
+    }
+    .steps { counter-reset: step; list-style: none; padding-left: 0; }
+    .steps > li {
+      position: relative; padding-left: 38px; margin: 14px 0; min-height: 28px;
+    }
+    .steps > li::before {
+      counter-increment: step; content: counter(step);
+      position: absolute; left: 0; top: 0;
+      width: 26px; height: 26px; border-radius: 50%;
+      background: #1f6feb; color: #fff; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; font-size: 14px;
+    }
+    .pos { color: #f85149; }
+    .neg { color: #3fb950; }
+    a.inline { color: #58a6ff; }
+    @media (max-width: 600px) {
+      .wrap { padding: 16px 12px 50px; }
+      h2 { font-size: 17px; }
+      body { font-size: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>使用帮助</h1>
+    <a class="back-btn" href="/">← 返回回测平台</a>
+  </div>
+
+  <div class="wrap">
+    <p>这是一个 <b>A股策略回测平台</b>：你可以自由组合多种入场/出场信号，在历史行情上回测，并支持 <b>PE 估值仓位管理（含融资杠杆）</b>、<b>一键寻优</b> 与 <b>牛熊环境最佳策略</b>。下面是完整使用说明。</p>
+
+    <h2>一、快速上手（3 步）</h2>
+    <ol class="steps">
+      <li><b>填写回测设置</b>：输入股票/指数代码（如 <code>sh000300</code> 沪深300、<code>600519</code> 茅台），选择起止日期、初始资金等。</li>
+      <li><b>勾选策略</b>：在"入场策略""出场策略"里勾选想用的信号，并设置每个信号的参数（如均线周期）。</li>
+      <li><b>点「运行回测」</b>：即可看到收益概要、K线买卖点图、资金曲线和逐笔交易明细。</li>
+    </ol>
+    <div class="note">页面打开后会自动用默认配置（沪深300 + 双均线金叉/唐奇安突破 → 跌破均线&双均线死叉）跑一次示例。</div>
+
+    <h2>二、回测设置</h2>
+    <table>
+      <tr><th>项目</th><th>说明</th></tr>
+      <tr><td>股票/指数代码</td><td>指数加 <code>sh</code>/<code>sz</code> 前缀（<code>sh000300</code>、<code>sz399006</code>）；个股直接填 6 位数字（<code>600519</code>）。</td></tr>
+      <tr><td>开始/结束日期</td><td>回测区间。结束日默认当天，<b>有新交易日会自动拉取最新K线</b>。</td></tr>
+      <tr><td>复权</td><td>前复权（推荐）/ 后复权 / 不复权。</td></tr>
+      <tr><td>初始资金</td><td>回测起始本金，默认 10 万。</td></tr>
+      <tr><td>手续费率</td><td>单边费率，默认 <code>0.0005</code>（万5），买卖都计。</td></tr>
+      <tr><td>融资年化利率</td><td>仓位 &gt;1 的融资部分按此利率<b>按日计息</b>，默认 <code>0.0699</code>（东方财富标准融资利率 6.99%）。</td></tr>
+    </table>
+
+    <h2>三、仓位管理（含融资杠杆）</h2>
+    <p>决定每次买入投入多少仓位，支持两种模式：</p>
+
+    <h3>1. PE 百分位（便宜多买，可融资）</h3>
+    <p>核心思路：<b>估值越便宜，仓位越重（可加杠杆）；估值越贵，仓位越轻。</b></p>
+    <ul>
+      <li>公式：<code>仓位 = (1 − PE百分位) × 2</code>，再钳制到 <b>[最低仓位, 最高仓位]</b>（默认 <code>[0.5, 2.0]</code>）。</li>
+      <li>PE 处于历史最便宜（分位 0%）→ <b>2.0 倍</b>（含 1.0 倍融资）；最贵（分位 100%）→ <b>0.5 倍</b>（保底轻仓）。</li>
+      <li><b>仓位 &gt;1 即为融资买入</b>，超出本金的部分按融资利率按日计息。</li>
+    </ul>
+
+    <h3>2. PE 上升逐步卸杠杆</h3>
+    <p>持仓过程中，<b>PE 百分位每比上次上升 ≥ N 个百分位点（默认 10），就按新仓位减仓卸杠杆</b>（卖出部分持仓、降低融资）。填 <code>0</code> 关闭。</p>
+    <ul>
+      <li>只在估值上涨时减仓、不会中途加杠杆，符合"涨高了逐步落袋、降风险"。</li>
+      <li>每次卸杠杆都会在交易明细里以可折叠子行展示，K线图上标橙色"减"标记。</li>
+    </ul>
+
+    <h3>3. 固定仓位</h3>
+    <p>恒定投入比例（如 <code>1</code>=满仓，<code>0.5</code>=半仓，<code>1.5</code>=1.5倍杠杆），不随估值变化。</p>
+
+    <div class="warn">PE 仓位仅对<b>有 PE 数据的指数</b>生效：沪深300 / 上证50 / 上证180 / 上证380 / 中证500 / 中证1000 / 创业板50；<b>创业板指(399006) 用创业板50的 PE 代理</b>；上证指数、深证成指及个股<b>无 PE 源会退化为满仓(1.0)</b>。</div>
+
+    <h2>四、入场 / 出场策略库</h2>
+    <p>每个信号可独立勾选、独立设参数，并用 <b>逻辑开关</b> 组合：</p>
+    <ul>
+      <li><span class="tag tag-blue">任一 (OR)</span> 只要满足其中<b>任意一个</b>信号即触发。</li>
+      <li><span class="tag tag-purple">同时 (AND)</span> 需<b>全部</b>勾选的信号同时满足才触发。</li>
+    </ul>
+
+    <h3>入场信号（5 种）</h3>
+    <table>
+      <tr><th>信号</th><th>含义</th></tr>
+      <tr><td>双均线金叉</td><td>快线上穿慢线（如 MA50 上穿 MA200），趋势转多。</td></tr>
+      <tr><td>唐奇安突破</td><td>创 N 日新高，突破入场。</td></tr>
+      <tr><td>均线多头排列</td><td>多条均线（如 5/10/20/60）自上而下排列，强趋势。</td></tr>
+      <tr><td>MACD 零轴上金叉</td><td>MACD 在零轴上方金叉，确认多头动能。</td></tr>
+      <tr><td>量价突破</td><td>创 N 日新高 + 成交量放大（量倍），突破更可靠。</td></tr>
+    </table>
+
+    <h3>出场信号（5 种）</h3>
+    <table>
+      <tr><th>信号</th><th>含义</th></tr>
+      <tr><td>跌破均线</td><td>收盘价跌破指定均线（如 MA20），趋势走弱离场。</td></tr>
+      <tr><td>吊灯 ATR 止损</td><td>从持仓最高点回落 N×ATR 止损，跟随式止盈止损。</td></tr>
+      <tr><td>移动止盈</td><td>从最高点回撤指定百分比即卖出，锁定利润。</td></tr>
+      <tr><td>唐奇安下轨</td><td>创 N 日新低，跌破离场。</td></tr>
+      <tr><td>双均线死叉</td><td>快线下穿慢线，趋势转空。</td></tr>
+    </table>
+
+    <h2>五、一键寻优</h2>
+    <p>点 <span class="tag tag-orange">⚡ 一键寻优</span> 会用当前选定的"标的 + 日期区间"，<b>自动遍历全部 3249 种入场/出场组合</b>回测，按"基金式综合评分"（兼顾收益、夏普、卡玛、回撤、超额等）排出 Top10，并对结构相似的组合做去重。点结果可直接载入查看。</p>
+    <div class="note">寻优用于<b>发现历史上表现好的组合</b>，但请注意过拟合（见末尾风险提示）。</div>
+
+    <h2>六、市场环境最佳策略</h2>
+    <p>页面顶部面板可一键在三段典型区间分别寻优，并把各自最佳组合做成卡片，点「直接载入」即可套用：</p>
+    <div class="card bull"><span class="tag tag-red">牛市</span> 单边上涨区间的最佳趋势策略。</div>
+    <div class="card bear"><span class="tag tag-green">熊市</span> 下跌区间最能控回撤的策略——趋势跟踪的核心价值。</div>
+    <div class="card cycle"><span class="tag tag-purple">一轮牛熊</span> 跨周期综合表现最稳健的策略。</div>
+
+    <h2>七、看懂交易明细</h2>
+    <table>
+      <tr><th>列</th><th>含义</th></tr>
+      <tr><td>买入金额 / 卖出金额</td><td>入场买入市值（含融资部分）/ 平仓回收金额。</td></tr>
+      <tr><td>仓位</td><td>该笔买入仓位，&gt;1 表示融资（如 <span class="pos">1.5×</span>），并标注买点 PE 分位。</td></tr>
+      <tr><td>融资利息 / 手续费</td><td>该笔持仓期间累计的融资利息与买卖手续费。</td></tr>
+      <tr><td>盈亏金额</td><td><b>真金白银净盈亏</b> = 出场后权益 − 入场前权益，已扣利息和手续费、含杠杆放大。</td></tr>
+      <tr><td>收益%</td><td>标的价格涨跌幅（不含杠杆/成本），与"盈亏金额"口径不同。</td></tr>
+      <tr><td>N次卸杠杆</td><td>有卸杠杆的交易，点击可展开每次减仓的明细（日期、金额、仓位变化、PE分位、手续费）。</td></tr>
+    </table>
+    <p>K线图标记：<span class="tag tag-red">买</span> 买入点 · <span class="tag tag-green">卖</span> 卖出点 · <span class="tag tag-orange">减</span> 卸杠杆减仓点。明细默认<b>从近到远</b>排序。</p>
+
+    <h2>八、数据与缓存</h2>
+    <ul>
+      <li>行情与 PE 数据来自公开数据源（akshare），首次拉取后本地缓存，再次使用秒开。</li>
+      <li><b>自动增量更新</b>：缓存最新日期距今 ≥2 天就联网补最新交易日数据。</li>
+      <li>A股一般<b>收盘后</b>当日K线才完整，盘中打开可能仍是前一交易日数据。</li>
+    </ul>
+
+    <h2>九、理性提示（重要）</h2>
+    <div class="warn">
+      <ul style="margin:0;">
+        <li><b>历史不代表未来</b>：回测优秀≠实盘赚钱，警惕在历史上"过拟合"出的完美参数。</li>
+        <li><b>融资有成本和风险</b>：杠杆放大收益也放大亏损，且每天都在付利息，长期持有融资成本很高。</li>
+        <li><b>控回撤优先</b>：趋势策略的核心价值常在熊市控回撤，而非牛市跑赢满仓。</li>
+        <li>本平台仅供<b>学习与研究</b>，不构成任何投资建议。</li>
+      </ul>
+    </div>
+
+    <p style="margin-top:30px;"><a class="back-btn" href="/">← 返回回测平台开始使用</a></p>
+  </div>
+</body>
+</html>
