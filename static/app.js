@@ -26,7 +26,7 @@ function renderStats(stats) {
     cards.push({ k: "交易手续费", v: "-" + fmtMoney(stats.total_commission), c: "neg" });
   }
   if (stats.deleverage_count) {
-    cards.push({ k: "卸杠杆次数", v: stats.deleverage_count, c: "" });
+    cards.push({ k: "减仓次数", v: stats.deleverage_count, c: "" });
   }
   $("stats").innerHTML = cards.map(c =>
     `<div class="stat-card"><div class="k">${c.k}</div><div class="v ${c.c}">${c.v}</div></div>`
@@ -126,7 +126,7 @@ function renderTrades(trades) {
     const profitTxt = `${profit >= 0 ? "+" : ""}${fmtMoney(profit)}`;
     const rbs = t.rebalances || [];
     const toggle = rbs.length
-      ? `<div class="delev-toggle" data-ti="${i}"><span class="caret">▶</span> ${rbs.length}次卸杠杆</div>`
+      ? `<div class="delev-toggle" data-ti="${i}"><span class="caret">▶</span> ${rbs.length}次减仓</div>`
       : "";
     let row = `<tr>
       <td>${i + 1}</td>
@@ -146,12 +146,15 @@ function renderTrades(trades) {
     </tr>`;
     // 卸杠杆减仓子行（默认折叠）
     rbs.forEach((rb, j) => {
+      const tag = (rb.pe_pct != null) ? "PE减仓" : (rb.gain != null ? "盈利减仓" : "减仓");
+      const detail = (rb.pe_pct != null) ? `PE分位${rb.pe_pct}%`
+        : (rb.gain != null ? `涨幅+${rb.gain}%` : "");
       row += `<tr class="rebalance-row rb-${i}" style="display:none">
         <td></td>
-        <td colspan="13">↳ <span class="delev">卸杠杆减仓 #${j + 1}</span> ${rb.date} @${rb.price}
+        <td colspan="13">↳ <span class="delev">${tag} #${j + 1}</span> ${rb.date} @${rb.price}
            · 卖出 ${fmtMoney(rb.amount)}（${rb.shares}份）
            · 仓位 ${rb.from_pos}×→${rb.to_pos}×
-           · PE分位${rb.pe_pct}% · 手续费 <span class="neg">-${rb.commission}</span></td>
+           · ${detail} · 手续费 <span class="neg">-${rb.commission}</span></td>
       </tr>`;
     });
     return row;
@@ -246,10 +249,14 @@ async function runBacktest() {
     (entrySet.has(div.dataset.type) ? entries : exits).push(spec);
   });
 
-  const posType = $("posType").value;
-  const position = posType === "fixed"
-    ? { type: "fixed", fraction: parseFloat($("posFixed").value) }
-    : { type: "pe_percentile", max_leverage: parseFloat($("posMaxLev").value), min_leverage: parseFloat($("posMinLev").value), deleverage_step: parseFloat($("posDelevStep").value) };
+  const position = {
+    entry: $("posEntryType").value,
+    reduce: $("posReduceType").value,
+    max_leverage: parseFloat($("posMaxLev").value),
+    min_leverage: parseFloat($("posMinLev").value),
+    reduce_step: parseFloat($("posReduceStep").value),
+    reduce_pct: parseFloat($("posReducePct").value),
+  };
 
   const payload = {
     symbol: $("symbol").value.trim(),
@@ -262,6 +269,8 @@ async function runBacktest() {
     strategy: {
       entry_logic: document.querySelector('input[name="entryLogic"]:checked').value,
       exit_logic: document.querySelector('input[name="exitLogic"]:checked').value,
+      entry_window: parseInt($("entryWindow").value) || 5,
+      exit_window: parseInt($("exitWindow").value) || 5,
       entries,
       exits,
       position,
@@ -321,7 +330,7 @@ async function runBacktest() {
       status.textContent = "⚠ " + diag.message;
     } else {
       let peNote = "";
-      if ($("posType").value === "pe_percentile") {
+      if ($("posEntryType").value === "pe_percentile" || $("posReduceType").value === "pe_percentile") {
         if (data.meta.pe_available) {
           peNote = data.meta.pe_proxy ? ` · PE仓位已启用(用「${data.meta.pe_proxy}」PE代理)` : " · PE仓位已启用";
         } else {
@@ -481,7 +490,8 @@ function localYMD(d) {
 const REGIMES = [
   { key: "bull", name: "牛市最佳", start: "2019-01-01", end: "2021-02-18", cls: "regime-bull" },
   { key: "bear", name: "熊市最佳", start: "2021-02-18", end: "2024-02-01", cls: "regime-bear" },
-  { key: "cycle", name: "一轮牛熊最佳", start: "2019-01-01", end: "2024-02-01", cls: "regime-cycle" },
+  { key: "cycle", name: "牛转熊最佳", start: "2019-01-01", end: "2024-02-01", cls: "regime-cycle" },
+  { key: "bearbull", name: "熊转牛最佳", start: "2021-02-18", end: "2026-06-22", cls: "regime-bearbull" },
 ];
 
 function loadRegime(reg, top) {
@@ -492,13 +502,16 @@ function loadRegime(reg, top) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+const REGIME_LABEL = "🎯 跑 牛市/熊市/牛熊/熊牛 最佳策略";
+
 async function runRegimes() {
   const wrap = $("regimeWrap");
   const btn = $("regimeBtn") || $("regimeBtn2");
   const symbol = $("symbol").value.trim();
-  if (btn) { btn.disabled = true; btn.textContent = "正在跑三种市场环境（每种3249组合，约十几秒）…"; }
+  wrap.style.display = "";
+  if (btn) { btn.disabled = true; btn.textContent = "正在跑四种市场环境…（约二十秒）"; }
 
-  _showLoading("正在跑三种市场环境最佳策略…");
+  _showLoading("正在跑四种市场环境最佳策略…");
   const results = [];
   for (const reg of REGIMES) {
     const okey = `${symbol}|${reg.start}|${reg.end}|${$("adjust").value}|${$("commission").value}`;
@@ -523,7 +536,7 @@ async function runRegimes() {
         data = { ok: false, error: e.message };
       }
     }
-    if (_handleRateLimit(data)) { _hideLoading(); if (btn) { btn.disabled = false; btn.textContent = "重新跑"; } return; }
+    if (_handleRateLimit(data)) { _hideLoading(); if (btn) { btn.disabled = false; btn.textContent = REGIME_LABEL; } return; }
     results.push({ reg, data });
   }
   await _sleep(1000);
@@ -559,6 +572,8 @@ async function runRegimes() {
     </div>
     <div class="regime-cards">${cards}</div>`;
 
+  if (btn) { btn.disabled = false; btn.textContent = REGIME_LABEL; }
+
   wrap.querySelectorAll(".rg-load").forEach(b => {
     b.addEventListener("click", () => {
       const idx = parseInt(b.dataset.idx);
@@ -570,11 +585,7 @@ async function runRegimes() {
   if (b2) b2.addEventListener("click", runRegimes);
 }
 
-// 初始放一个触发按钮
-$("regimeWrap").innerHTML = `<div class="regime-head">
-    <h2>市场环境最佳策略 <span class="sub">分别在 牛市 / 熊市 / 一轮牛熊 区间寻优，结果可直接载入</span></h2>
-    <button id="regimeBtn" class="regime-btn">🎯 跑牛市 / 熊市 / 牛熊 最佳策略</button>
-  </div>`;
+// 触发按钮在左侧面板(静态HTML)，结果渲染到右侧 regimeWrap
 $("regimeBtn").addEventListener("click", runRegimes);
 
 // 字段说明问号：点击切换对应 .hint 的显示
@@ -592,6 +603,43 @@ document.addEventListener("click", (e) => {
 
 $("runBtn").addEventListener("click", runBacktest);
 $("optBtn").addEventListener("click", runOptimize);
+
+// ===== 仓位管理 UI 联动：减仓策略决定显示哪些参数 =====
+function updatePosUI() {
+  const reduce = $("posReduceType").value;
+  const rowStep = $("rowReduceStep");
+  const lblStep = $("lblReduceStep");
+  const lblPct = $("lblReducePct");
+  if (reduce === "none") {
+    rowStep.style.display = "none";
+  } else {
+    rowStep.style.display = "";
+    if (reduce === "profit") {
+      lblStep.firstChild.textContent = "上涨步长(%)";
+      lblPct.style.display = "";
+    } else {  // pe_percentile
+      lblStep.firstChild.textContent = "PE上升步长(百分位点)";
+      lblPct.style.display = "none";
+    }
+  }
+}
+$("posReduceType").addEventListener("change", updatePosUI);
+$("posEntryType").addEventListener("change", updatePosUI);
+updatePosUI();
+
+// 入场/出场逻辑切换：AND 时显示容忍窗口控件，OR 时隐藏
+function updateEntryWindowUI() {
+  const isAnd = document.querySelector('input[name="entryLogic"]:checked').value === "and";
+  $("entryWindowWrap").hidden = !isAnd;
+}
+function updateExitWindowUI() {
+  const isAnd = document.querySelector('input[name="exitLogic"]:checked').value === "and";
+  $("exitWindowWrap").hidden = !isAnd;
+}
+document.querySelectorAll('input[name="entryLogic"]').forEach(r => r.addEventListener("change", updateEntryWindowUI));
+document.querySelectorAll('input[name="exitLogic"]').forEach(r => r.addEventListener("change", updateExitWindowUI));
+updateEntryWindowUI();
+updateExitWindowUI();
 
 // ===== 右上角反馈按钮 =====
 function initFeedback() {

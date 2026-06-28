@@ -46,7 +46,26 @@ CN_LABEL = {
 }
 
 
-POSITION_TYPES = ("pe_percentile", "fixed")
+# 建仓策略(entry)：
+#   pe_percentile  按"买入点近5年PE百分位"线性映射仓位：分位0%→最高仓位，100%→最低仓位
+#   fixed          固定满仓 = 用户设置的最高仓位(max_leverage)
+ENTRY_POSITION_TYPES = ("pe_percentile", "fixed")
+# 减仓策略(reduce)：
+#   none           不减仓
+#   pe_percentile  持仓中PE近5年百分位每上升 reduce_step 个点，按PE曲线降到对应仓位
+#   profit         相对买入点每上涨 reduce_step%，仓位下调 reduce_pct 个百分点
+REDUCE_POSITION_TYPES = ("none", "pe_percentile", "profit")
+
+
+def _default_position():
+    return {
+        "entry": "pe_percentile",      # 建仓策略
+        "reduce": "pe_percentile",     # 减仓策略
+        "max_leverage": 2.0,           # 最高仓位(也是 fixed 建仓的满仓值、PE曲线上沿)
+        "min_leverage": 0.5,           # 最低仓位(PE曲线下沿)
+        "reduce_step": 10.0,           # pe_percentile:百分位点步长 / profit:涨幅%步长
+        "reduce_pct": 10.0,            # profit 专用：每步下调的仓位百分点
+    }
 
 
 @dataclass
@@ -55,11 +74,10 @@ class StrategyConfig:
     exits: list = field(default_factory=list)
     entry_logic: str = "or"   # "or" / "and"
     exit_logic: str = "or"
-    # 仓位管理：决定入场时投入多少仓位(可>1=融资)
-    #  pe_percentile: 仓位 = clamp((1-PE百分位)*2, min_leverage, max_leverage)
-    #  fixed:         仓位 = fraction
-    position: dict = field(default_factory=lambda: {
-        "type": "pe_percentile", "max_leverage": 2.0, "min_leverage": 0.5, "deleverage_step": 10.0})
+    entry_window: int = 5     # 入场AND容忍窗口(交易日)：各策略在窗口内先后满足即触发；1=同天满足
+    exit_window: int = 5      # 出场AND容忍窗口(交易日)：各策略在窗口内先后满足即触发；1=同天满足
+    # 仓位管理：建仓(entry) + 减仓(reduce) 两段解耦
+    position: dict = field(default_factory=_default_position)
 
     @classmethod
     def from_dict(cls, d: dict) -> "StrategyConfig":
@@ -68,19 +86,40 @@ class StrategyConfig:
         exits = [e for e in d.get("exits", []) if isinstance(e, dict) and e.get("type") in EXIT_TYPES]
         el = "and" if str(d.get("entry_logic", "or")).lower() == "and" else "or"
         xl = "and" if str(d.get("exit_logic", "or")).lower() == "and" else "or"
+        entry_window = max(1, int(d.get("entry_window", 5)))
+        exit_window = max(1, int(d.get("exit_window", 5)))
 
         pos = d.get("position") or {}
-        ptype = pos.get("type", "pe_percentile")
-        if ptype not in POSITION_TYPES:
-            ptype = "pe_percentile"
-        if ptype == "fixed":
-            position = {"type": "fixed", "fraction": float(pos.get("fraction", 1.0))}
-        else:
-            position = {"type": "pe_percentile",
-                        "max_leverage": float(pos.get("max_leverage", 2.0)),
-                        "min_leverage": float(pos.get("min_leverage", 0.5)),
-                        "deleverage_step": float(pos.get("deleverage_step", 10.0))}
-        return cls(entries=entries, exits=exits, entry_logic=el, exit_logic=xl, position=position)
+        max_lev = float(pos.get("max_leverage", 2.0))
+        min_lev = float(pos.get("min_leverage", 0.5))
+
+        # 建仓策略（兼容旧结构 type=fixed/pe_percentile，旧 fixed.fraction 作为满仓）
+        entry = pos.get("entry")
+        if entry is None:
+            entry = "fixed" if pos.get("type") == "fixed" else "pe_percentile"
+        if entry not in ENTRY_POSITION_TYPES:
+            entry = "pe_percentile"
+        if pos.get("type") == "fixed" and "fraction" in pos and "max_leverage" not in pos:
+            max_lev = float(pos.get("fraction", 1.0))
+
+        # 减仓策略（兼容旧 deleverage_step：>0 视为 pe_percentile 减仓）
+        reduce = pos.get("reduce")
+        if reduce is None:
+            ds = float(pos.get("deleverage_step", 0) or 0)
+            reduce = "pe_percentile" if ds > 0 else "none"
+        if reduce not in REDUCE_POSITION_TYPES:
+            reduce = "none"
+
+        reduce_step = float(pos.get("reduce_step", pos.get("deleverage_step", 10.0)) or 0)
+        reduce_pct = float(pos.get("reduce_pct", 10.0) or 0)
+
+        position = {
+            "entry": entry, "reduce": reduce,
+            "max_leverage": max_lev, "min_leverage": min_lev,
+            "reduce_step": reduce_step, "reduce_pct": reduce_pct,
+        }
+        return cls(entries=entries, exits=exits, entry_logic=el, exit_logic=xl,
+                   entry_window=entry_window, exit_window=exit_window, position=position)
 
     def to_dict(self):
         return {
@@ -88,5 +127,7 @@ class StrategyConfig:
             "exits": self.exits,
             "entry_logic": self.entry_logic,
             "exit_logic": self.exit_logic,
+            "entry_window": self.entry_window,
+            "exit_window": self.exit_window,
             "position": self.position,
         }

@@ -11,48 +11,78 @@ import pandas as pd
 from .strategy import StrategyConfig, ENTRY_DEFAULTS, EXIT_DEFAULTS, CN_LABEL
 
 
-def _build_position_fractions(config, dates, pe_series):
-    """返回每个交易日的"入场仓位"数组(>1 表示融资)。
+def _years_ago(date_str, years):
+    """date_str 往前推 years 年，返回 'YYYY-MM-DD'；闰日(2/29)退到 2/28。"""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        try:
+            return d.replace(year=d.year - years).strftime("%Y-%m-%d")
+        except ValueError:
+            return d.replace(year=d.year - years, day=28).strftime("%Y-%m-%d")
+    except Exception:
+        return None
 
-    pe_percentile: 仓位 = clamp((1-PE百分位)*2, min_leverage, max_leverage)，PE百分位为该PE在区间内的分位。
-                   即 PE 最贵(分位100%)也保留最低 0.5 仓，PE 最便宜(分位0%)最高 2 倍。
-    fixed:         恒定 fraction。
-    无PE数据时退化为满仓 1.0。
+
+def _trailing_pe_percentiles(dates, pe_series, window_years=5):
+    """对每个回测交易日，计算其 PE 在"近 window_years 年"滚动窗口内的百分位(0~100)。
+
+    pe_series 需包含回测开始前 window_years 年的 PE 历史，区间起点才能正确取分位。
+    返回 (pe_aligned, pcts)：pe_aligned 为前向填充到交易日的 PE 值；pcts 为对应近5年分位。
+    分位 0% = 近5年最便宜(PE 最低)，100% = 近5年最贵。
+    """
+    n = len(dates)
+    pe_map = pe_series or {}
+    items = sorted((d, v) for d, v in pe_map.items() if v is not None)
+    pe_dates = [d for d, _ in items]
+    pe_vals = [v for _, v in items]
+    m = len(items)
+
+    pe_aligned = [None] * n
+    pcts = [None] * n
+    if m == 0:
+        return pe_aligned, pcts
+
+    for i, d in enumerate(dates):
+        hi = bisect.bisect_right(pe_dates, d)  # 日期 <= d 的条数
+        if hi == 0:
+            continue
+        cur = pe_vals[hi - 1]                  # 当前 PE(前向填充)
+        pe_aligned[i] = cur
+        ws = _years_ago(d, window_years)
+        lo = bisect.bisect_right(pe_dates, ws) if ws else 0  # 窗口 (d-Ny, d]
+        window = pe_vals[lo:hi]
+        if not window:
+            continue
+        sw = sorted(window)
+        rank = bisect.bisect_right(sw, cur)
+        pcts[i] = round(rank / len(sw) * 100, 1)
+    return pe_aligned, pcts
+
+
+def _build_position_fractions(config, dates, pe_series):
+    """返回每个交易日的"建仓仓位"数组(>1 表示融资) 与 近5年PE百分位数组。
+
+    建仓策略(entry)：
+      pe_percentile: 仓位 = max_lev − (max_lev−min_lev)×(近5年PE分位/100)。
+                     即 分位 0%(最便宜)→最高仓位，分位 100%(最贵)→最低仓位，线性插值。
+                     无PE数据时退化为满仓 1.0。
+      fixed:         固定满仓 = max_leverage。
     """
     n = len(dates)
     pos = config.position or {}
-    ptype = pos.get("type", "pe_percentile")
-
-    if ptype == "fixed":
-        f = float(pos.get("fraction", 1.0))
-        return [f] * n, [None] * n
-
-    # pe_percentile
+    entry_type = pos.get("entry", "pe_percentile")
     max_lev = float(pos.get("max_leverage", 2.0))
     min_lev = float(pos.get("min_leverage", 0.5))
-    pe_map = pe_series or {}
-    # 对齐到交易日并前向填充
-    pe_aligned = [None] * n
-    last = None
-    for i, d in enumerate(dates):
-        if d in pe_map and pe_map[d] is not None:
-            last = pe_map[d]
-        pe_aligned[i] = last
-    valid = sorted(v for v in pe_aligned if v is not None)
+
+    pe_aligned, pcts = _trailing_pe_percentiles(dates, pe_series)
+
     fracs = [1.0] * n
-    pcts = [None] * n
-    if valid:
-        m = len(valid)
-        for i in range(n):
-            v = pe_aligned[i]
-            if v is None:
-                fracs[i] = 1.0
-            else:
-                pct = bisect.bisect_right(valid, v) / m  # PE 百分位(0~1)
-                fr = (1 - pct) * 2
-                fr = max(min_lev, min(max_lev, fr))
-                fracs[i] = fr
-                pcts[i] = round(pct * 100, 1)
+    for i in range(n):
+        if entry_type == "fixed":
+            fracs[i] = max_lev
+        else:  # pe_percentile
+            p = pcts[i]
+            fracs[i] = 1.0 if p is None else (max_lev - (max_lev - min_lev) * (p / 100.0))
     return fracs, pcts
 
 
@@ -292,12 +322,31 @@ def run_backtest(df: pd.DataFrame, config: StrategyConfig,
     # 入场组合状态 -> 上升沿信号
     entry_states = [_entry_state(s, ctx) for s in config.entries]
 
-    def combine(states_at_i, logic):
-        if logic == "and":
-            return all(states_at_i)
-        return any(states_at_i)
+    # AND 容忍窗口：各策略在 [i-window+1, i] 内曾满足即算组合满足。
+    # window=1 退化为同天满足；OR 不受窗口影响。
+    window = max(1, getattr(config, "entry_window", 1)) if config.entry_logic == "and" else 1
 
-    entry_combo = [combine([st[i] for st in entry_states], config.entry_logic) for i in range(n)]
+    if window > 1 and len(entry_states) >= 2:
+        # 滑动窗口预计算：每个策略在窗口内是否曾为 True
+        def _recent_true(state):
+            out = [False] * n
+            cnt = 0
+            for i in range(n):
+                if state[i]:
+                    cnt += 1
+                if i >= window and state[i - window]:
+                    cnt -= 1
+                out[i] = cnt > 0
+            return out
+        recents = [_recent_true(st) for st in entry_states]
+        entry_combo = [all(r[i] for r in recents) for i in range(n)]
+    else:
+        def combine(states_at_i, logic):
+            if logic == "and":
+                return all(states_at_i)
+            return any(states_at_i)
+        entry_combo = [combine([st[i] for st in entry_states], config.entry_logic) for i in range(n)]
+
     entry_signal = [False] * n
     for i in range(n):
         prev = entry_combo[i - 1] if i >= 1 else False
@@ -324,6 +373,15 @@ def run_backtest(df: pd.DataFrame, config: StrategyConfig,
             if ap not in atr_cache:
                 atr_cache[ap] = _atr(highs, lows, closes, ap)
 
+    # 出场 AND 容忍窗口：各策略在窗口内先后触发即算"同时满足"。
+    # exit_window=1 退化为严格同天满足；OR 不受窗口影响。
+    # 用每个出场策略"最近一次触发的交易日索引"判定：i - last < window 即视为窗口内仍有效。
+    exit_window = max(1, getattr(config, "exit_window", 1)) if config.exit_logic == "and" else 1
+    n_exits = len(static_exits) + len(dynamic_specs)
+    use_exit_window = exit_window > 1 and n_exits >= 2
+    # 每个出场策略最近一次触发日索引(-∞ 表示尚未触发)；顺序=先 static 后 dynamic，与下方 bools 一致
+    exit_last_true = [-(10 ** 9)] * n_exits
+
     cash = float(initial_capital)
     shares = 0.0
     buy_price = 0.0
@@ -332,15 +390,23 @@ def run_backtest(df: pd.DataFrame, config: StrategyConfig,
     hh_since = 0.0   # 持仓期间最高价
     hc_since = 0.0   # 持仓期间最高收盘
 
-    # 仓位管理：每个交易日的入场仓位(>1=融资)
+    # 仓位管理：每个交易日的建仓仓位(>1=融资) + 近5年PE百分位
     pos_fracs, pe_pcts = _build_position_fractions(config, dates, pe_series)
-    # PE 每上升 deleverage_step 个百分位点，重算仓位逐步卸杠杆(0=不启用)
     _pos = config.position or {}
-    deleverage_step = float(_pos.get("deleverage_step", 0)) if _pos.get("type") == "pe_percentile" else 0.0
+    _max_lev = float(_pos.get("max_leverage", 2.0))
+    _min_lev = float(_pos.get("min_leverage", 0.5))
+    reduce_type = _pos.get("reduce", "none")          # none / pe_percentile / profit
+    reduce_step = float(_pos.get("reduce_step", 0) or 0)
+    reduce_pct = float(_pos.get("reduce_pct", 0) or 0)
+
+    def _pe_target_frac(p):
+        """近5年PE分位 p(0~100) 对应的目标仓位(与建仓PE曲线一致)。"""
+        return _max_lev - (_max_lev - _min_lev) * (p / 100.0)
 
     cur_frac = 0.0       # 本笔展示用(入场)仓位
-    live_frac = 0.0      # 本笔当前实际仓位(卸杠杆后会下调)
+    live_frac = 0.0      # 本笔当前目标仓位(减仓后会下调)
     anchor_pct = None    # 上次(重)计仓位时的 PE 百分位
+    profit_steps_done = 0  # 盈利减仓：本笔已动作的涨幅档数
     cur_pe_pct = None
     cur_interest = 0.0   # 本笔持仓累计融资利息
     cur_commission = 0.0 # 本笔累计交易手续费(买入+卸杠杆减仓+卖出)
@@ -402,6 +468,7 @@ def run_backtest(df: pd.DataFrame, config: StrategyConfig,
                     cur_frac = frac
                     live_frac = frac
                     anchor_pct = pe_pcts[i]
+                    profit_steps_done = 0
                     cur_pe_pct = pe_pcts[i]
                     labels = [_entry_label(config.entries[k]) for k in range(len(entry_states)) if entry_states[k][i]]
                     buys.append({"date": dates[i], "price": round(price, 4), "position": round(frac, 3),
@@ -410,42 +477,70 @@ def run_backtest(df: pd.DataFrame, config: StrategyConfig,
             hh_since = max(hh_since, highs[i])
             hc_since = max(hc_since, closes[i])
 
-            # PE 上升逐步卸杠杆：百分位每比上次重算时上升 deleverage_step 点，按新仓位减仓
-            if deleverage_step > 0 and anchor_pct is not None:
+            # ===== 减仓策略 =====
+            # 求本日目标仓位 new_frac(相对权益的实际仓位)与起始仓位 from_frac；None 表示不减
+            equity = cash + shares * price
+            cur_ratio = (shares * price / equity) if equity > 0 else 0.0  # 当前实际仓位
+            new_frac = None
+            from_frac = cur_ratio
+            ev_extra = {}
+            reduce_reason = ""
+            if reduce_type == "pe_percentile" and reduce_step > 0 and anchor_pct is not None:
+                # PE 近5年分位每上升 reduce_step 点，按PE曲线降到对应目标仓位
                 cp = pe_pcts[i]
-                if cp is not None and cp >= anchor_pct + deleverage_step:
-                    new_frac = pos_fracs[i]  # = clamp((1-PE百分位)*2, min, max)
-                    if new_frac < live_frac:
-                        equity = cash + shares * price
-                        target_val = equity * new_frac
-                        cur_val = shares * price
-                        if target_val < cur_val and price > 0:
-                            sell_sh = (cur_val - target_val) / price
-                            if sell_sh > 0:
-                                comm = sell_sh * price * commission
-                                cash += sell_sh * price - comm
-                                shares -= sell_sh
-                                cur_commission += comm
-                                total_commission += comm
-                                rebalances += 1
-                                ev = {
-                                    "date": dates[i], "price": round(price, 4),
-                                    "shares": round(sell_sh, 2), "amount": round(sell_sh * price, 2),
-                                    "commission": round(comm, 2), "pe_pct": cp,
-                                    "from_pos": round(live_frac, 3), "to_pos": round(new_frac, 3),
-                                }
-                                cur_rebalances.append(ev)
-                                sells.append({"date": dates[i], "price": round(price, 4),
-                                              "reason": f"卸杠杆减仓 {round(live_frac,3)}→{round(new_frac,3)}",
-                                              "kind": "deleverage"})
-                        live_frac = new_frac
+                if cp is not None and cp >= anchor_pct + reduce_step:
+                    nf = _pe_target_frac(cp)
                     anchor_pct = cp
+                    if nf < live_frac:
+                        new_frac = nf
+                        from_frac = live_frac
+                        ev_extra = {"pe_pct": cp}
+                        reduce_reason = f"PE减仓 {round(live_frac,3)}→{round(nf,3)}"
+            elif reduce_type == "profit" and reduce_step > 0 and reduce_pct > 0 and buy_price > 0:
+                # 相对买入点每上涨 reduce_step%，就在当前实际仓位上再下调 reduce_pct 个百分点
+                gain = price / buy_price - 1
+                steps = int(gain // (reduce_step / 100.0))
+                if steps > profit_steps_done:
+                    new_steps = steps - profit_steps_done
+                    profit_steps_done = steps
+                    nf = max(cur_ratio - new_steps * (reduce_pct / 100.0), 0.0)
+                    if nf < cur_ratio - 1e-9:
+                        new_frac = nf
+                        from_frac = cur_ratio
+                        ev_extra = {"gain": round(gain * 100, 2)}
+                        reduce_reason = f"盈利减仓(+{round(gain*100,1)}%) {round(cur_ratio,3)}→{round(nf,3)}"
+
+            if new_frac is not None:
+                target_val = equity * new_frac
+                cur_val = shares * price
+                if target_val < cur_val and price > 0:
+                    sell_sh = (cur_val - target_val) / price
+                    if sell_sh > 0:
+                        comm = sell_sh * price * commission
+                        cash += sell_sh * price - comm
+                        shares -= sell_sh
+                        cur_commission += comm
+                        total_commission += comm
+                        rebalances += 1
+                        ev = {
+                            "date": dates[i], "price": round(price, 4),
+                            "shares": round(sell_sh, 2), "amount": round(sell_sh * price, 2),
+                            "commission": round(comm, 2),
+                            "from_pos": round(from_frac, 3), "to_pos": round(new_frac, 3),
+                        }
+                        ev.update(ev_extra)
+                        cur_rebalances.append(ev)
+                        sells.append({"date": dates[i], "price": round(price, 4),
+                                      "reason": reduce_reason, "kind": "deleverage"})
+                live_frac = new_frac
 
             triggered = []   # (spec, True)
             bools = []
+            specs_in_order = []
             for spec, arr in static_exits:
                 b = arr[i]
                 bools.append(b)
+                specs_in_order.append(spec)
                 if b:
                     triggered.append(spec)
             for spec in dynamic_specs:
@@ -461,10 +556,24 @@ def run_backtest(df: pd.DataFrame, config: StrategyConfig,
                     pct = float(spec.get("pct", 10))
                     b = price < hc_since * (1 - pct / 100.0)
                 bools.append(b)
+                specs_in_order.append(spec)
                 if b:
                     triggered.append(spec)
 
-            do_exit = (all(bools) if config.exit_logic == "and" else any(bools)) and len(bools) > 0
+            # 更新各出场策略"最近一次触发日"
+            for k, b in enumerate(bools):
+                if b:
+                    exit_last_true[k] = i
+
+            if config.exit_logic == "and":
+                if use_exit_window:
+                    # 容忍窗口：每个策略最近一次触发都落在 [i-window+1, i] 内 -> 视为同时满足
+                    do_exit = all((i - exit_last_true[k]) < exit_window for k in range(n_exits)) \
+                        and n_exits > 0
+                else:
+                    do_exit = all(bools) and len(bools) > 0
+            else:
+                do_exit = any(bools) and len(bools) > 0
             if do_exit:
                 sell_comm = shares * price * commission
                 cash += shares * price - sell_comm
@@ -492,6 +601,8 @@ def run_backtest(df: pd.DataFrame, config: StrategyConfig,
                 cur_rebalances = []
                 entry_date = None
                 entry_idx = None
+                # 平仓后重置出场窗口追踪，避免上一笔的触发记录影响下一笔持仓
+                exit_last_true = [-(10 ** 9)] * n_exits
 
         equity_curve.append([dates[i], round(cash + shares * price, 2)])
 

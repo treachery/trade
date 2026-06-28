@@ -145,12 +145,32 @@ docker run -d --name trade --restart unless-stopped \
   -v /root/trade_data_cache:/app/data_cache \
   -e GITHUB_TOKEN='你的fine-grained PAT（Issues读写权限）' \
   -e GITHUB_REPO='treachery/trade' \
+  -e SMTP_HOST='smtp.gmail.com' -e SMTP_PORT='465' -e SMTP_SSL='1' \
+  -e SMTP_USER='发件邮箱' -e SMTP_PASS='应用专用密码/授权码' -e SMTP_FROM='发件邮箱' \
   trade:latest
 ```
 
 - 生产用 `gunicorn` 运行（见 Dockerfile），通过环境变量 `HOST/PORT/DEBUG` 控制。
-- `GITHUB_TOKEN`：用于反馈功能自动创建 Issue（fine-grained PAT，仅授权目标仓库的 Issues 读写）。**切勿将 token 写入代码或提交到 git**（`.gitignore` 已排除 `.env`/`*.token`）。
 - 缓存目录挂载到宿主机，重启不丢已拉取的行情/PE 数据。
+- **切勿将 token / 密码写入代码或提交到 git**（`.gitignore` 已排除 `.env`/`*.token`）。
+
+### 环境变量一览
+
+| 变量 | 用途 | 是否必填 | 示例/默认 |
+|---|---|---|---|
+| `HOST` / `PORT` / `DEBUG` | 服务监听与调试 | 否 | `0.0.0.0` / `5000` / `0` |
+| `GITHUB_TOKEN` | 反馈功能自动建 Issue（fine-grained PAT，仅授权目标仓库 Issues 读写） | 否（用反馈才需要） | `github_pat_xxx` |
+| `GITHUB_REPO` | 反馈 Issue 写入的仓库 | 否 | `owner/repo` |
+| `SCAN_WORKERS` | trade-notify 扫描并发线程数（IO密集） | 否 | 默认 `10`，上限 24 |
+| `SMTP_HOST` | **邮件推送**发件 SMTP 服务器（不设则邮件功能关闭，仅 webhook 可用） | 用邮件才需要 | `smtp.gmail.com` / `smtp.qq.com` |
+| `SMTP_PORT` | SMTP 端口 | 否 | 默认 `465` |
+| `SMTP_SSL` | `1`=SSL(465) / `0`=STARTTLS(587) | 否 | 默认 `1` |
+| `SMTP_USER` | 发件邮箱登录账号 | 用邮件才需要 | `you@gmail.com` |
+| `SMTP_PASS` | 发件邮箱密码（Gmail/QQ 须用「应用专用密码/授权码」，非登录密码） | 用邮件才需要 | — |
+| `SMTP_FROM` | 发件人地址 | 否 | 默认同 `SMTP_USER` |
+
+> 本地开发可把上述变量放进项目根目录的 `.env`（已被 git 忽略），启动前 `set -a; source .env; set +a` 加载，再 `python app.py`。
+> 邮件「收件地址」不是环境变量——在订阅页「推送邮箱」里填写。
 
 ### 3. Nginx 反向代理（80 端口 + gzip + 真实 IP）
 

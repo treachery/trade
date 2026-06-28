@@ -52,6 +52,15 @@ main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
 .logic-toggle { float: right; font-size: 11px; font-weight: 400; color: #8b949e; }
 .logic-toggle label { display: inline; margin: 0 0 0 8px; }
 .logic-toggle input { width: auto; margin: 0 3px 0 0; }
+/* AND 容忍窗口：标题下独立一行(灰色小字)，输入框窄、与文字基线对齐 */
+.window-field {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  font-size: 11px; color: #6e7681; margin: -4px 0 10px;
+}
+.window-field input {
+  width: 46px; margin: 0; padding: 2px 5px; text-align: center;
+  font-size: 11px; flex: none;
+}
 
 .strat { border: 1px solid #21262d; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: #0d1117; }
 .strat > label.checkbox { margin-bottom: 0; font-size: 13px; color: #e6e6e6; }
@@ -80,6 +89,9 @@ button#runBtn:disabled { background: #30363d; cursor: not-allowed; }
 }
 .opt-btn:hover { background: #a371f7; }
 .opt-btn:disabled { background: #30363d; cursor: not-allowed; }
+.regime-btn-panel { width: 100%; margin-top: 8px; padding: 10px; background: #1f6feb; border: none; border-radius: 6px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+.regime-btn-panel:hover { background: #388bfd; }
+.regime-btn-panel:disabled { background: #30363d; cursor: not-allowed; }
 .status { margin-top: 10px; font-size: 12px; color: #8b949e; min-height: 16px; }
 .status.error { color: #f85149; }
 
@@ -92,12 +104,14 @@ button#runBtn:disabled { background: #30363d; cursor: not-allowed; }
 .regime-btn:disabled { background: #30363d; cursor: not-allowed; }
 .regime-btn-sm { background: #21262d; border: 1px solid #30363d; border-radius: 5px; color: #c9d1d9; padding: 5px 10px; font-size: 12px; cursor: pointer; }
 .regime-btn-sm:hover { background: #30363d; }
-.regime-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.regime-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
+@media (max-width: 1400px) { .regime-cards { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 1100px) { .regime-cards { grid-template-columns: 1fr; } }
 .regime-card { border: 1px solid #21262d; border-left-width: 4px; border-radius: 8px; padding: 10px 12px; background: #0d1117; }
 .regime-card.regime-bull { border-left-color: #f85149; }
 .regime-card.regime-bear { border-left-color: #3fb950; }
 .regime-card.regime-cycle { border-left-color: #a371f7; }
+.regime-card.regime-bearbull { border-left-color: #d29922; }
 .rg-name { font-size: 13px; font-weight: 600; color: #e6e6e6; }
 .rg-name .rg-range { font-size: 11px; color: #6e7681; font-weight: 400; margin-left: 4px; }
 .rg-combo { font-size: 12px; color: #c9d1d9; margin: 6px 0; }
@@ -177,6 +191,13 @@ td.neg { color: #3fb950; }
   transition: background .15s;
 }
 .help-link:hover { background: #388bfd; }
+.notify-link {
+  display: inline-block; margin-left: 12px; padding: 4px 12px;
+  background: #d2992233; color: #d29922; border: 1px solid #d2992255;
+  border-radius: 6px; font-size: 13px; font-weight: 600; text-decoration: none;
+  vertical-align: middle; transition: background .15s;
+}
+.notify-link:hover { background: #d2992255; color: #f0b429; }
 
 /* 字段说明问号：默认隐藏说明，点击问号展开 */
 .q-tip {

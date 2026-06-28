@@ -9,7 +9,8 @@
 </head>
 <body>
   <header>
-    <h1>股票策略回测平台 <a href="/help" class="help-link" title="使用帮助" target="_blank" rel="noopener">?</a> <span class="sub">可组合的入场/出场策略库</span></h1>
+    <h1>股票策略回测平台 <a href="/help" class="help-link" title="使用帮助" target="_blank" rel="noopener">?</a> <span class="sub">可组合的入场/出场策略库</span>
+      <a href="/trade-notify" class="notify-link" title="买卖信号订阅通知">🔔 信号订阅通知</a></h1>
   </header>
 
   <main>
@@ -48,33 +49,52 @@
       <div class="hint" id="hintMargin" hidden>默认 0.0699（东方财富标准融资利率6.99%）；仓位>1的融资部分按此利率按日计息</div>
 
       <button id="runBtn">运行回测</button>
-      <button id="optBtn" class="opt-btn">⚡ 一键寻优（跑全部3249组合）</button>
+      <button id="optBtn" class="opt-btn">⚡ 一键寻优(跑所有3249种策略组合)</button>
       <span class="q-tip" data-target="hintOpt">?</span>
       <div class="hint" id="hintOpt" hidden>用上方选定的"日期/标的"跑全部组合，按基金式综合评分排Top10</div>
+      <button id="regimeBtn" class="regime-btn-panel">🎯 跑 牛市/熊市/牛熊/熊牛 最佳策略</button>
+      <span class="q-tip" data-target="hintRegime">?</span>
+      <div class="hint" id="hintRegime" hidden>分别在四段区间(均以沪深300寻优)取综合评分Top1：牛市 2019-01~2021-02 · 熊市 2021-02~2024-02 · 牛转熊 2019-01~2024-02 · 熊转牛 2021-02~2026-06。结果显示在右侧，点卡片「直接载入」即可套用。</div>
       <div id="status" class="status"></div>
 
       <h2>仓位管理</h2>
-      <label>入场仓位策略 <span class="q-tip" data-target="hintPos">?</span>
-        <select id="posType">
+
+      <label>建仓策略 <span class="q-tip" data-target="hintEntryPos">?</span>
+        <select id="posEntryType">
           <option value="pe_percentile" selected>PE百分位（便宜多买，可融资）</option>
-          <option value="fixed">固定仓位</option>
+          <option value="fixed">固定满仓（=最高仓位）</option>
         </select>
       </label>
-      <div class="hint" id="hintPos" hidden>PE百分位：仓位=(1−PE百分位)×2，并钳制到[最低,最高]区间。最便宜时2倍(含融资)、最贵时0.5倍。仅支持的指数有PE，个股退化为满仓</div>
+      <div class="hint" id="hintEntryPos" hidden>PE百分位：买入点的「近5年PE百分位」线性映射仓位——分位0%(近5年最便宜)→最高仓位，分位100%(最贵)→最低仓位。固定满仓：始终按"最高仓位"建仓。仅支持的指数有PE，个股退化为满仓</div>
+
       <div class="row">
-        <label>最高仓位<input id="posMaxLev" type="number" value="2" step="0.1" min="1" /></label>
+        <label>最高仓位<input id="posMaxLev" type="number" value="2" step="0.1" min="0" /></label>
         <label>最低仓位<input id="posMinLev" type="number" value="0.5" step="0.1" min="0" /></label>
       </div>
-      <label>PE上升卸杠杆步长(百分位点) <span class="q-tip" data-target="hintDelev">?</span>
-        <input id="posDelevStep" type="number" value="10" step="1" min="0" />
+
+      <label>减仓策略 <span class="q-tip" data-target="hintReducePos">?</span>
+        <select id="posReduceType">
+          <option value="none">不减仓</option>
+          <option value="pe_percentile" selected>PE百分位减仓</option>
+          <option value="profit">盈利减仓</option>
+        </select>
       </label>
-      <div class="hint" id="hintDelev" hidden>持仓中PE百分位每上升此点数(默认10)就按新仓位减仓卸杠杆；填0关闭</div>
-      <label>固定仓位<input id="posFixed" type="number" value="1" step="0.1" min="0" /></label>
+      <div class="hint" id="hintReducePos" hidden>PE百分位减仓：持仓中「近5年PE百分位」每上升一个步长，就按PE曲线降到对应仓位（如步长10、最低0.5最高2，分位涨到10%时仓位200%→185%）。盈利减仓：相对买入点每上涨一个步长，仓位下调"减仓比例"个百分点（如步长50%、减仓比例10%，涨50%时200%→190%）</div>
+
+      <div class="row" id="rowReduceStep">
+        <label id="lblReduceStep">PE上升步长(百分位点)<input id="posReduceStep" type="number" value="10" step="1" min="0" /></label>
+        <label id="lblReducePct" style="display:none">减仓比例(百分点)<input id="posReducePct" type="number" value="10" step="1" min="0" /></label>
+      </div>
 
       <h2>入场策略 <span class="logic-toggle">
         <label><input type="radio" name="entryLogic" value="or" checked> 任一(OR)</label>
         <label><input type="radio" name="entryLogic" value="and"> 同时(AND)</label>
       </span></h2>
+      <div id="entryWindowWrap" class="window-field" hidden>
+        <span>容忍窗口</span>
+        <input id="entryWindow" type="number" value="5" step="1" min="1">
+        <span>个交易日内先后满足即视为同时</span>
+      </div>
 
       <div class="strat" data-type="ma_golden">
         <label class="checkbox"><input type="checkbox" class="strat-on" checked> 双均线金叉</label>
@@ -101,6 +121,11 @@
         <label><input type="radio" name="exitLogic" value="or"> 任一(OR)</label>
         <label><input type="radio" name="exitLogic" value="and" checked> 同时(AND)</label>
       </span></h2>
+      <div id="exitWindowWrap" class="window-field">
+        <span>容忍窗口</span>
+        <input id="exitWindow" type="number" value="5" step="1" min="1">
+        <span>个交易日内先后满足即视为同时</span>
+      </div>
 
       <div class="strat" data-type="ma_break">
         <label class="checkbox"><input type="checkbox" class="strat-on" checked> 跌破均线</label>
@@ -125,7 +150,7 @@
     </aside>
 
     <section class="content">
-      <div id="regimeWrap" class="regime-wrap"></div>
+      <div id="regimeWrap" class="regime-wrap" style="display:none"></div>
       <div id="optWrap" class="opt-wrap" style="display:none"></div>
       <div id="stats" class="stats"></div>
       <div id="kchart" class="chart"></div>

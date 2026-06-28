@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>买卖信号订阅通知 · 股票策略回测平台</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #0f1419; color: #e6e6e6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.6; font-size: 14px;
+    }
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      background: #161b22; border-bottom: 1px solid #2a2f37;
+      padding: 12px 18px; display: flex; align-items: center; justify-content: space-between;
+    }
+    .topbar h1 { font-size: 17px; margin: 0; color: #58a6ff; }
+    .topbar h1 .sub { font-size: 12px; color: #8b949e; font-weight: 400; margin-left: 8px; }
+    .back-btn {
+      background: #1f6feb; color: #fff; text-decoration: none;
+      padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    }
+    .back-btn:hover { background: #388bfd; }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 18px 16px 60px; }
+    .grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; align-items: start; }
+    @media (max-width: 880px) { .grid { grid-template-columns: 1fr; } }
+
+    .panel { background: #161b22; border: 1px solid #2a2f37; border-radius: 10px; padding: 16px; }
+    .panel h2 { font-size: 14px; margin: 0 0 12px; color: #58a6ff; }
+    .panel h3 { font-size: 13px; margin: 16px 0 8px; color: #8b949e; font-weight: 600; }
+    .sec-desc { font-size: 12px; color: #6e7681; margin: -4px 0 10px; }
+
+    .chk-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow:auto; padding-right:4px; }
+    label.chk { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+    label.chk input { width: auto; }
+    .chk .code { color: #6e7681; font-size: 11px; margin-left: auto; font-family: Consolas, monospace; }
+
+    .field { margin: 10px 0; }
+    .field label { display:block; font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+    .field input[type=text], .field input[type=number] {
+      width: 100%; padding: 7px 9px; background: #0d1117; border: 1px solid #30363d;
+      border-radius: 6px; color: #e6e6e6; font-size: 13px;
+    }
+    .switch { display:flex; align-items:center; gap:8px; font-size:13px; margin:8px 0; }
+    .switch input { width:auto; }
+    .row2 { display:flex; gap:8px; }
+    .row2 > * { flex:1; }
+
+    button { font-family: inherit; cursor: pointer; border:none; border-radius:6px; font-weight:600;
+      transition: background .12s, transform .06s, box-shadow .12s; }
+    button:active { transform: translateY(1px) scale(0.985); }
+    .btn-primary { width:100%; padding:11px; background:#238636; color:#fff; font-size:14px; margin-top:6px; }
+    .btn-primary:hover { background:#2ea043; }
+    .btn-primary:active { background:#1a6e2c; }
+    .btn-primary:disabled { background:#30363d; cursor:not-allowed; transform:none; }
+    .btn-sec { padding:7px 12px; background:#21262d; color:#c9d1d9; border:1px solid #30363d; font-size:12px; }
+    .btn-sec:hover { background:#30363d; border-color:#484f58; }
+    .btn-sec:active { background:#161b22; }
+    .btn-save { width:100%; padding:9px; background:#1f6feb; color:#fff; font-size:13px; margin-top:8px; }
+    .btn-save:hover { background:#388bfd; }
+    .btn-save:active { background:#1857c4; }
+    /* 点击瞬时高亮反馈(JS 临时加 .flash) */
+    button.flash { box-shadow: 0 0 0 3px rgba(88,166,255,.5); }
+    /* 行内即时提示徽标 */
+    .inline-toast { display:inline-block; margin-left:8px; font-size:12px; font-weight:600;
+      opacity:0; transition:opacity .2s; }
+    .inline-toast.show { opacity:1; }
+    .inline-toast.ok { color:#3fb950; }
+    .inline-toast.err { color:#f85149; }
+
+    .progress-wrap { margin-top:12px; }
+    .bar { height: 8px; background:#0d1117; border:1px solid #30363d; border-radius:6px; overflow:hidden; }
+    .bar > i { display:block; height:100%; width:0; background:#238636; transition: width .3s; }
+    .status { font-size:12px; color:#8b949e; margin-top:6px; min-height:16px; }
+    .status.error { color:#f85149; }
+
+    .toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+    .toolbar .meta { font-size:12px; color:#6e7681; }
+    .filters { display:flex; gap:6px; }
+    .filters button { padding:5px 12px; background:#21262d; color:#8b949e; border:1px solid #30363d; font-size:12px; border-radius:6px; }
+    .filters button.active { background:#1f6feb; color:#fff; border-color:#1f6feb; }
+
+    .cards { display:grid; grid-template-columns: repeat(auto-fill, minmax(330px,1fr)); gap:12px; }
+    .scard { background:#161b22; border:1px solid #21262d; border-left-width:4px; border-radius:10px; padding:12px 14px; }
+    .scard.has-exit { border-left-color:#f85149; }
+    .scard.has-entry { border-left-color:#3fb950; }
+    .scard.has-both { border-left-color:#d29922; }
+    .sc-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+    .sc-name { font-size:15px; font-weight:700; color:#e6edf3; }
+    .sc-name .sc-code { font-size:11px; color:#6e7681; font-weight:400; margin-left:4px; font-family:Consolas,monospace; }
+    .sc-cat { font-size:11px; padding:1px 7px; border-radius:4px; background:#1f6feb33; color:#58a6ff; white-space:nowrap; }
+    .sc-cat.industry { background:#a371f733; color:#a371f7; }
+    .sc-cat.a500 { background:#d2992233; color:#d29922; }
+    .sc-cat.custom { background:#3fb95033; color:#3fb950; }
+    .sc-cat.holding { background:#f8514933; color:#f85149; }
+    .sc-score { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; margin:8px 0 2px; }
+    .score-badge { font-size:13px; font-weight:700; padding:2px 10px; border-radius:6px; color:#fff; }
+    .score-badge.score-high { background:#238636; }
+    .score-badge.score-mid { background:#9e6a03; }
+    .score-badge.score-low { background:#b62324; }
+    .score-level { font-size:12px; font-weight:600; color:#c9d1d9; }
+    .score-detail { font-size:11px; color:#8b949e; }
+    .sc-meta { font-size:12px; color:#8b949e; margin:6px 0; display:flex; flex-wrap:wrap; gap:2px 12px; }
+    .sc-meta b { color:#c9d1d9; }
+    .sc-meta .pe-low { color:#3fb950; }
+    .sc-meta .pe-high { color:#f85149; }
+    .sig-block { margin-top:8px; }
+    .sig-label { font-size:11px; color:#6e7681; margin-bottom:3px; }
+    .chips { display:flex; flex-wrap:wrap; gap:5px; }
+    .chip { font-size:11px; padding:2px 8px; border-radius:12px; white-space:nowrap; }
+    .chip.buy { background:#3fb95022; color:#3fb950; border:1px solid #3fb95055; }
+    .chip.sell { background:#f8514922; color:#f85149; border:1px solid #f8514955; }
+    .chip .ago { opacity:.7; margin-left:3px; }
+    .empty { text-align:center; color:#6e7681; padding:40px 20px; font-size:14px; }
+    .note { background:#1f6feb1a; border-left:4px solid #1f6feb; padding:9px 12px; border-radius:6px; font-size:12px; color:#c9d1d9; margin:10px 0; }
+    .warn { background:#d299221a; border-left:4px solid #d29922; padding:9px 12px; border-radius:6px; font-size:12px; color:#c9d1d9; margin:10px 0; }
+    a.inline { color:#58a6ff; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>买卖信号订阅通知 <span class="sub">每日扫描 · 入场/清仓信号提醒</span></h1>
+    <a class="back-btn" href="/">← 返回回测平台</a>
+  </div>
+
+  <div class="wrap">
+    <div class="grid">
+      <!-- 左侧：订阅设置 -->
+      <aside class="panel">
+        <h2>📋 订阅列表</h2>
+        <p class="sec-desc">每组订阅可设置不同的标的、持仓和 Webhook，分别独立推送。</p>
+        <div class="row2" style="align-items:flex-end;">
+          <select id="subSelect" style="width:100%;padding:7px 9px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#e6e6e6;font-size:13px;"></select>
+        </div>
+        <div class="row2" style="margin-top:8px;">
+          <button class="btn-sec" id="newSub">＋ 新建订阅</button>
+          <button class="btn-sec" id="delSub" style="color:#f85149;">🗑 删除当前</button>
+        </div>
+        <div id="subToast" class="inline-toast" style="margin:6px 0 0;display:block;"></div>
+        <div class="field" style="margin-top:12px;">
+          <label>订阅名称（列表中的唯一标识）</label>
+          <input type="text" id="subName" placeholder="如：我的核心持仓 / A500监控" />
+        </div>
+
+        <h2 style="margin-top:18px;">① 选择监听标的</h2>
+        <p class="sec-desc">默认包含 5 个宽基指数（中证A500 / 沪深300 / 创业50 / 上证指数 / 深证成指）+ 中证A500成分股。</p>
+
+        <h3>宽基指数 <button class="btn-sec" id="broadAll" style="float:right;padding:2px 8px;">全选/全不选</button></h3>
+        <div class="chk-list" id="broadList"></div>
+
+        <h3>中证A500成分股</h3>
+        <label class="switch"><input type="checkbox" id="incA500" checked> 包含中证A500成分股 <span id="a500Count" style="color:#6e7681;font-size:12px;"></span></label>
+        <div class="warn" id="a500Warn">⚠️ A500 含约 500 只个股，首次扫描需联网逐个拉取行情，可能耗时数分钟（之后命中本地缓存会快很多）。</div>
+
+        <div class="field">
+          <label>额外自定义标的（逗号分隔代码，如 600519,000001）</label>
+          <input type="text" id="customSyms" placeholder="可留空" />
+        </div>
+
+        <h2 style="margin-top:18px;">② 我的持仓</h2>
+        <p class="sec-desc">填写你持有的股票代码（逗号分隔，如 600519,000858）。持仓中的票一旦出现<b style="color:#f85149;">清仓信号</b>，推送会<b>置顶重点提醒</b>。</p>
+        <div class="field">
+          <input type="text" id="holdings" placeholder="可留空，如 600519,000858" />
+        </div>
+
+        <h2 style="margin-top:18px;">③ 扫描与通知设置</h2>
+        <div class="field">
+          <label>通知近 N 个交易日内触发的信号</label>
+          <input type="number" id="lookback" value="10" min="1" max="60" />
+        </div>
+        <p class="sec-desc">接收方式可同时配置 Webhook 和邮箱，两边都会推送。<b>每个接收地址只能建一个订阅。</b></p>
+        <div class="field">
+          <label>推送 Webhook（支持企业微信/钉钉机器人、Server酱）</label>
+          <input type="text" id="webhook" placeholder="https://qyapi.weixin.qq.com/... " />
+        </div>
+        <div class="field">
+          <label>推送邮箱（SMTP 发送）</label>
+          <input type="text" id="email" placeholder="you@example.com" />
+        </div>
+        <button class="btn-sec" id="testWebhook">测试推送</button>
+        <label class="switch" style="margin-top:10px;"><input type="checkbox" id="autoEnabled"> 每日收盘后(15:30)自动扫描并推送</label>
+
+        <button class="btn-save" id="saveSub">💾 保存订阅设置</button>
+        <button class="btn-primary" id="scanBtn">▶ 立即扫描</button>
+
+        <div class="progress-wrap" id="progressWrap" style="display:none">
+          <div class="bar"><i id="barFill"></i></div>
+          <div class="status" id="scanStatus"></div>
+        </div>
+      </aside>
+
+      <!-- 右侧：结果 -->
+      <section>
+        <div class="note" id="introNote">
+          点「立即扫描」对所选标的运行项目定义的 <b>5 个入场指标</b> 和 <b>5 个清仓指标</b>，
+          下方会列出近 N 个交易日内触发了信号的标的，含触发信号、当前估值与建议仓位。
+        </div>
+        <div class="toolbar">
+          <div class="filters">
+            <button class="active" data-filter="all">全部</button>
+            <button data-filter="entry">仅买入信号</button>
+            <button data-filter="exit">仅清仓信号</button>
+          </div>
+          <span class="meta" id="resultMeta"></span>
+        </div>
+        <div class="cards" id="cards"></div>
+        <div class="empty" id="emptyTip">暂无结果，点左侧「立即扫描」开始。</div>
+      </section>
+    </div>
+  </div>
+
+  <script src="/static/notify.js"></script>
+</body>
+</html>

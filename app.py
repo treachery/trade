@@ -7,16 +7,37 @@
 import os
 import time
 import json
+import smtplib
 import threading
 import urllib.request
 import traceback
+from email.mime.text import MIMEText
+from email.header import Header
+from email.utils import formataddr
+from datetime import datetime
 from collections import defaultdict, deque, OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, render_template, request, jsonify
 
 from backtest import load_kline, load_pe, run_backtest, run_optimization, StrategyConfig, INDEX_PE_PROXY
+from backtest.scanner import (scan_symbol, default_symbols, get_a500_constituents,
+                              BROAD_INDICES, INDUSTRY_INDICES)
+from backtest.data import CACHE_DIR
 
 app = Flask(__name__)
+
+
+def _minus_years(date_str, years):
+    """date_str 往前推 years 年(用于加载更早的PE历史)；闰日(2/29)退到 2/28。"""
+    try:
+        d = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+        try:
+            return d.replace(year=d.year - years).strftime("%Y-%m-%d")
+        except ValueError:
+            return d.replace(year=d.year - years, day=28).strftime("%Y-%m-%d")
+    except Exception:
+        return date_str
 
 
 # ===== 服务端 LRU 缓存：最多100组回测/寻优结果，避免重复计算 =====
@@ -134,9 +155,51 @@ def _check_rate_limit():
     return True, None
 
 
+# 是否完全禁用限流：DISABLE_RATE_LIMIT=1 强制关闭（备用开关）
+_DISABLE_RATE_LIMIT = os.environ.get("DISABLE_RATE_LIMIT", "") == "1"
+
+# 限流豁免：轻量「读取/轮询」类接口不计数，避免前端进度轮询(每1.2s一次)和
+# 页面加载的纯读取请求撑爆限流额度。限流只针对重计算/触发类接口
+# (回测/寻优/扫描启动/推送/订阅写入)。
+_RATE_EXEMPT_PATHS = {
+    "/api/notify/scan_status",   # 扫描进度轮询(高频)
+    "/api/notify/latest",        # 读取最近一次扫描结果
+    "/api/notify/symbols",       # 读取可选标的列表
+    "/api/notify/subscriptions", # 读取订阅列表
+}
+
+
+def _is_rate_exempt():
+    """是否豁免限流：豁免路径 + 所有 GET 读取请求(只读不触发重计算)。"""
+    if request.path in _RATE_EXEMPT_PATHS:
+        return True
+    # 订阅的 GET 查询(读取单组)也豁免；POST/DELETE(写入)仍限流
+    if request.path == "/api/notify/subscription" and request.method == "GET":
+        return True
+    return False
+
+
+def _is_local_direct_request():
+    """本地直连调试请求：回环地址且无任何反向代理转发头。
+    生产经 Nginx 反代时会带 X-Real-IP / X-Forwarded-For 等头，
+    不会被误判为本地，限流仍照常生效。"""
+    if (request.headers.get("X-Real-IP")
+            or request.headers.get("X-Forwarded-For")
+            or request.headers.get("CF-Connecting-IP")):
+        return False
+    ra = request.remote_addr or ""
+    return ra.startswith("127.") or ra in ("::1", "localhost")
+
+
 @app.before_request
 def _rate_limit_guard():
     if request.path.startswith("/api/"):
+        # 本地调试直连放行，不触发限流（不影响生产环境）
+        if _DISABLE_RATE_LIMIT or _is_local_direct_request():
+            return
+        # 轻量读取/轮询接口豁免，不占用限流额度
+        if _is_rate_exempt():
+            return
         ok, msg = _check_rate_limit()
         if not ok:
             return jsonify({"ok": False, "error": msg, "rate_limited": True}), 429
@@ -162,6 +225,11 @@ def index():
 @app.route("/help")
 def help_page():
     return render_template("help.html")
+
+
+@app.route("/trade-notify")
+def trade_notify_page():
+    return render_template("trade_notify.html")
 
 
 @app.route("/api/backtest", methods=["POST"])
@@ -191,11 +259,14 @@ def api_backtest():
             return jsonify({"ok": False, "error": f"未获取到 {symbol} 在 {start}~{end} 的数据，请检查代码或区间。"})
 
         # PE 仓位管理所需的市盈率序列(仅支持的指数有)
+        # 近5年滚动百分位需 start 前 5 年历史，故 PE 从 start-5y 开始加载
         pe_series = None
         pe_available = False
         pe_proxy = INDEX_PE_PROXY.get(str(symbol).strip().lower())
-        if config.position.get("type") == "pe_percentile":
-            pe_df = load_pe(symbol, start, end)
+        pos = config.position
+        need_pe = pos.get("entry") == "pe_percentile" or pos.get("reduce") == "pe_percentile"
+        if need_pe:
+            pe_df = load_pe(symbol, _minus_years(start, 5), end)
             if pe_df is not None and not pe_df.empty:
                 pe_series = dict(zip(pe_df["date"], pe_df["pe"]))
                 pe_available = True
@@ -307,11 +378,648 @@ def api_feedback():
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
 
+# ===================================================================
+# ===== trade-notify：买卖信号订阅通知 =====
+# ===================================================================
+_SUB_PATH = os.path.join(CACHE_DIR, "notify_subscription.json")
+_LATEST_PATH = os.path.join(CACHE_DIR, "notify_latest.json")
+
+# 内存中的扫描任务表：task_id -> 进度/结果快照
+_scan_tasks = OrderedDict()
+_scan_lock = threading.Lock()
+_SCAN_TASK_MAX = 20
+
+
+def _default_subscription(name="默认订阅"):
+    """单组订阅：宽基 + 行业 + 中证A500，近10交易日，自动扫描关闭。"""
+    return {
+        "name": name,           # 订阅名(仅展示)
+        "symbols": None,        # None 表示用默认标的（含A500，动态获取）
+        "include_a500": True,
+        "lookback_days": 10,
+        "webhook": "",          # 接收地址之一：webhook URL
+        "email": "",            # 接收地址之一：邮箱(SMTP 发送)
+        "auto_enabled": False,
+        "holdings": [],         # 我的持仓：[[code, name], ...]，持仓中出现清仓信号会重点提醒
+    }
+
+
+def _coerce_subscription(d, fallback_name="默认订阅"):
+    """把任意 dict 规整为一组完整订阅(补齐缺省字段)。"""
+    base = _default_subscription(fallback_name)
+    if isinstance(d, dict):
+        base.update({k: v for k, v in d.items() if k in base})
+    base["name"] = str(base.get("name") or fallback_name).strip() or fallback_name
+    base["holdings"] = _normalize_holdings(base.get("holdings"))
+    return base
+
+
+def _normalize_holdings(raw):
+    """把各种形态的持仓输入规整为 [[code, name], ...]。"""
+    out = []
+    for it in (raw or []):
+        if isinstance(it, dict):
+            code = str(it.get("symbol") or it.get("code") or "").strip()
+            nm = str(it.get("name") or "").strip()
+        elif isinstance(it, (list, tuple)):
+            code = str(it[0]).strip() if len(it) >= 1 else ""
+            nm = str(it[1]).strip() if len(it) >= 2 else ""
+        else:
+            code = str(it).strip()
+            nm = ""
+        if code:
+            out.append([code, nm or code])
+    return out
+
+
+def _load_subscriptions():
+    """加载订阅列表 [sub, ...]。兼容旧的单组格式(自动迁移为一组)。"""
+    if os.path.exists(_SUB_PATH):
+        try:
+            with open(_SUB_PATH, encoding="utf-8") as f:
+                d = json.load(f)
+            # 新格式：{"subscriptions": [...]}
+            if isinstance(d, dict) and isinstance(d.get("subscriptions"), list):
+                subs, seen = [], set()
+                for i, s in enumerate(d["subscriptions"]):
+                    one = _coerce_subscription(s, f"订阅{i + 1}")
+                    nm = one["name"]
+                    while nm in seen:           # 名称去重
+                        nm += "_"
+                    one["name"] = nm
+                    seen.add(nm)
+                    subs.append(one)
+                if subs:
+                    return subs
+            # 旧格式：单个 dict -> 迁移为一组
+            if isinstance(d, dict):
+                return [_coerce_subscription(d, "默认订阅")]
+        except Exception:
+            pass
+    return [_default_subscription()]
+
+
+def _save_subscriptions(subs):
+    try:
+        with open(_SUB_PATH, "w", encoding="utf-8") as f:
+            json.dump({"subscriptions": subs}, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[notify] 保存订阅失败：{e}")
+
+
+def _find_subscription(name):
+    """按名称取一组订阅；name 为空时返回第一组。"""
+    subs = _load_subscriptions()
+    if not name:
+        return subs[0] if subs else _default_subscription()
+    for s in subs:
+        if s["name"] == name:
+            return s
+    return None
+
+
+def _load_subscription():
+    """兼容旧调用：返回第一组订阅(主要给测试推送/手动扫描缺省持仓用)。"""
+    subs = _load_subscriptions()
+    return subs[0] if subs else _default_subscription()
+
+
+def _resolve_symbols(sub):
+    """把订阅配置解析为待扫描标的列表 [[symbol, name, category], ...]。
+    持仓(holdings)中的票一律并入扫描范围(去重)，确保能检测其清仓信号。"""
+    syms = sub.get("symbols")
+    out = []
+    if syms:
+        for it in syms:
+            if isinstance(it, (list, tuple)) and len(it) >= 1:
+                code = str(it[0]).strip()
+                name = str(it[1]).strip() if len(it) >= 2 else code
+                cat = str(it[2]).strip() if len(it) >= 3 else "custom"
+                out.append([code, name, cat])
+    if not out:
+        out = list(default_symbols(include_a500=sub.get("include_a500", True)))
+
+    # 并入持仓标的(去重)：持仓里若有不在列表中的票，补进来并标记 category=holding
+    have = {str(r[0]).strip() for r in out}
+    for code, name in _normalize_holdings(sub.get("holdings")):
+        if code not in have:
+            out.append([code, name, "holding"])
+            have.add(code)
+    return out
+
+
+def _save_latest(results, total, lookback_days, source="manual"):
+    payload = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source,
+        "total": total,
+        "lookback_days": lookback_days,
+        "results": results,
+    }
+    try:
+        with open(_LATEST_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[notify] 保存最新结果失败：{e}")
+    return payload
+
+
+def _load_latest():
+    if os.path.exists(_LATEST_PATH):
+        try:
+            with open(_LATEST_PATH, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _pe_text(pe):
+    """估值简述。"""
+    if not pe:
+        return "无PE"
+    if pe.get("percentile") is None:
+        return f"PE{pe['pe']}·当前TTM"
+    return f"PE{pe['pe']}/{pe['percentile']}%分位·{pe['level']}"
+
+
+def _format_notify_text(payload, holdings=None):
+    """把扫描结果汇总成一段适合 IM 推送的 markdown 文本。
+
+    结构：
+      ① ⚠️ 持仓清仓提醒：持仓(holdings)中出现清仓信号的标的，重点列出；
+      ② 🏆 最推荐买入 Top10：按「推荐买入分」从高到低的前 10 只，含详情。
+    """
+    results = payload.get("results", [])
+    lb = payload.get("lookback_days", 10)
+    hold_codes = {str(c).strip() for c, _ in _normalize_holdings(holdings)}
+
+    lines = [f"### 📈 买卖信号通知（近{lb}个交易日）",
+             f"扫描 {payload.get('total', 0)} 个标的 · {payload.get('time', '')}", ""]
+
+    # ① 持仓清仓重点提醒
+    if hold_codes:
+        hold_exits = [r for r in results
+                      if str(r.get("symbol")).strip() in hold_codes and r.get("exits")]
+        hold_exits.sort(key=lambda r: min((s.get("days_ago", 99) for s in r["exits"]), default=99))
+        lines.append("#### ⚠️ 持仓清仓提醒")
+        if hold_exits:
+            for r in hold_exits:
+                sigs = "、".join(
+                    f"{s['label']}（{'今日' if s.get('days_ago') == 0 else str(s.get('days_ago')) + '日前'}）"
+                    for s in r["exits"])
+                lines.append(f"- 🔴 **{r.get('name') or r.get('symbol')}**({r.get('symbol')}) "
+                             f"触发清仓：{sigs} | {_pe_text(r.get('pe'))}")
+        else:
+            lines.append("- ✅ 你的持仓近期均未触发清仓信号。")
+        lines.append("")
+
+    # ② 最推荐买入 Top10
+    ranked = sorted(results, key=lambda r: (r.get("score") or {}).get("score", -1), reverse=True)
+    top = ranked[:10]
+    lines.append("#### 🏆 最推荐买入 Top10")
+    if not top:
+        lines.append("近期无标的触发信号。")
+        return "\n".join(lines)
+    for idx, r in enumerate(top, 1):
+        sc = r.get("score") or {}
+        sc_txt = f"{sc['score']}·{sc['level']}" if sc.get("score") is not None else "—"
+        tag = []
+        if r.get("entries"):
+            buy_sig = "、".join(s["label"] for s in r["entries"][:3])
+            tag.append(f"🟢{buy_sig}")
+        if r.get("exits"):
+            tag.append("🔴有清仓信号")
+        sug = r.get("suggest", {}).get("text", "")
+        lines.append(
+            f"{idx}. 【{sc_txt}】**{r.get('name') or r.get('symbol')}**({r.get('symbol')}) "
+            f"最新价{r.get('last_close')} | {_pe_text(r.get('pe'))} | 建议仓位{sug}"
+            + (f"\n   {' / '.join(tag)}" if tag else ""))
+    return "\n".join(lines)
+
+
+def _push_webhook(url, text):
+    """推送到 webhook。自动适配企业微信机器人 / Server酱 / 通用 JSON。"""
+    if not url:
+        return False, "未配置webhook"
+    try:
+        low = url.lower()
+        if "qyapi.weixin" in low:                      # 企业微信群机器人
+            payload = {"msgtype": "markdown", "markdown": {"content": text}}
+        elif "sctapi.ftqq" in low or "sc.ftqq" in low:  # Server酱
+            first = text.strip().splitlines()[0] if text.strip() else "信号通知"
+            payload = {"title": first[:60], "desp": text}
+        elif "oapi.dingtalk" in low:                    # 钉钉机器人
+            payload = {"msgtype": "markdown", "markdown": {"title": "买卖信号通知", "text": text}}
+        else:                                            # 通用
+            payload = {"text": text, "content": text}
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+        return True, "ok"
+    except Exception as e:
+        print(f"[notify] webhook 推送失败：{e}")
+        return False, str(e)
+
+
+def _smtp_config():
+    """从环境变量读取 SMTP 发件配置。
+      SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM / SMTP_SSL(1/0)
+    """
+    host = os.environ.get("SMTP_HOST", "").strip()
+    if not host:
+        return None
+    return {
+        "host": host,
+        "port": int(os.environ.get("SMTP_PORT", "465")),
+        "user": os.environ.get("SMTP_USER", "").strip(),
+        "pass": os.environ.get("SMTP_PASS", "").strip(),
+        "from": os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", "")).strip(),
+        "ssl": os.environ.get("SMTP_SSL", "1") != "0",
+    }
+
+
+def _send_email(to_addr, subject, text):
+    """通过 SMTP 发送一封纯文本邮件。发件配置取自环境变量(见 _smtp_config)。"""
+    if not to_addr:
+        return False, "未配置邮箱"
+    cfg = _smtp_config()
+    if cfg is None:
+        return False, "服务端未配置SMTP(需设置 SMTP_HOST 等环境变量)"
+    try:
+        msg = MIMEText(text, "plain", "utf-8")
+        msg["Subject"] = Header(subject[:120], "utf-8")
+        msg["From"] = formataddr(("trade-notify", cfg["from"]))
+        msg["To"] = to_addr
+        if cfg["ssl"]:
+            srv = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20)
+        else:
+            srv = smtplib.SMTP(cfg["host"], cfg["port"], timeout=20)
+            srv.starttls()
+        try:
+            if cfg["user"]:
+                srv.login(cfg["user"], cfg["pass"])
+            srv.sendmail(cfg["from"], [to_addr], msg.as_string())
+        finally:
+            srv.quit()
+        return True, "ok"
+    except Exception as e:
+        print(f"[notify] 邮件推送失败：{e}")
+        return False, str(e)
+
+
+def _dispatch_notify(sub, text, subject="trade-notify 买卖信号通知"):
+    """按订阅配置的接收方式分发(webhook + email 都发)。返回 [(渠道, ok, msg), ...]。"""
+    out = []
+    url = str(sub.get("webhook", "")).strip()
+    mail = str(sub.get("email", "")).strip()
+    if url:
+        ok, msg = _push_webhook(url, text)
+        out.append(("webhook", ok, msg))
+    if mail:
+        ok, msg = _send_email(mail, subject, text)
+        out.append(("email", ok, msg))
+    return out
+
+
+def _run_scan_task(task_id, symbols, lookback_days, source="manual", webhook="", holdings=None):
+    """后台执行批量扫描，逐个更新进度。仅保留有信号的标的。"""
+    results = []
+    total = len(symbols)
+    # 并发数：IO 密集(网络抓数)，默认 10，可用环境变量 SCAN_WORKERS 覆盖；上限 24 防限频
+    try:
+        workers = max(1, min(int(os.environ.get("SCAN_WORKERS", 10)), 24))
+    except Exception:
+        workers = 10
+    workers = min(workers, total) or 1
+
+    def _scan_one(item):
+        sym, name, cat = (item + ["", ""])[:3] if isinstance(item, list) else (item, "", "")
+        try:
+            return scan_symbol(sym, name, cat, lookback_days=lookback_days)
+        except Exception as e:
+            return {"symbol": sym, "name": name, "category": cat, "error": str(e)}
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_scan_one, item) for item in symbols]
+        for fut in as_completed(futures):
+            r = fut.result()
+            done += 1
+            with _scan_lock:
+                t = _scan_tasks.get(task_id)
+                if t is None:
+                    return
+                t["done"] = done
+                t["current"] = r.get("name") or r.get("symbol") or ""
+                if r.get("has_signal"):
+                    results.append(r)
+                    t["results"] = list(results)
+    payload = _save_latest(results, total, lookback_days, source=source)
+    with _scan_lock:
+        t = _scan_tasks.get(task_id)
+        if t is not None:
+            t["done"] = total
+            t["current"] = ""
+            t["status"] = "finished"
+            t["finished"] = True
+            t["results"] = results
+    if webhook:
+        _push_webhook(webhook, _format_notify_text(payload, holdings=holdings))
+
+
+@app.route("/api/notify/symbols")
+def api_notify_symbols():
+    """返回可选标的列表：宽基/行业(写死) + 中证A500成分股(动态)。"""
+    try:
+        include_a500 = request.args.get("include_a500", "1") != "0"
+        a500 = get_a500_constituents() if include_a500 else []
+        return jsonify({
+            "ok": True,
+            "broad": [{"symbol": c, "name": n} for c, n in BROAD_INDICES],
+            "industry": [{"symbol": c, "name": n} for c, n in INDUSTRY_INDICES],
+            "a500": [{"symbol": c, "name": n} for c, n in a500],
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+@app.route("/api/notify/scan", methods=["POST"])
+def api_notify_scan():
+    """启动一次扫描任务（异步），返回 task_id 供轮询。"""
+    try:
+        body = request.get_json(force=True) or {}
+        lookback_days = max(1, min(int(body.get("lookback_days", 10)), 60))
+        symbols = body.get("symbols")
+        if symbols:
+            norm = []
+            for it in symbols:
+                if isinstance(it, dict):
+                    norm.append([str(it.get("symbol", "")).strip(),
+                                 str(it.get("name", "")).strip(),
+                                 str(it.get("category", "custom")).strip()])
+                elif isinstance(it, (list, tuple)):
+                    norm.append([str(it[0]).strip(),
+                                 str(it[1]).strip() if len(it) > 1 else "",
+                                 str(it[2]).strip() if len(it) > 2 else "custom"])
+            symbols = [s for s in norm if s[0]]
+        else:
+            symbols = default_symbols(include_a500=bool(body.get("include_a500", True)))
+
+        # 持仓：优先用请求体，缺省读已保存订阅；并入扫描范围(去重)以便检测清仓信号
+        holdings = _normalize_holdings(body.get("holdings")) \
+            if "holdings" in body else _normalize_holdings(_load_subscription().get("holdings"))
+        have = {str(s[0]).strip() for s in symbols}
+        for code, name in holdings:
+            if code not in have:
+                symbols.append([code, name, "holding"])
+                have.add(code)
+
+        if not symbols:
+            return jsonify({"ok": False, "error": "没有可扫描的标的"})
+
+        task_id = f"scan_{int(time.time() * 1000)}"
+        with _scan_lock:
+            _scan_tasks[task_id] = {
+                "status": "running", "finished": False,
+                "total": len(symbols), "done": 0, "current": "",
+                "results": [], "started": time.time(),
+            }
+            while len(_scan_tasks) > _SCAN_TASK_MAX:
+                _scan_tasks.popitem(last=False)
+
+        webhook = str(body.get("webhook", "")).strip()
+        threading.Thread(target=_run_scan_task,
+                         args=(task_id, symbols, lookback_days, "manual", webhook, holdings),
+                         daemon=True).start()
+        return jsonify({"ok": True, "task_id": task_id, "total": len(symbols)})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+@app.route("/api/notify/scan_status")
+def api_notify_scan_status():
+    task_id = request.args.get("task_id", "")
+    with _scan_lock:
+        t = _scan_tasks.get(task_id)
+        if t is None:
+            return jsonify({"ok": False, "error": "任务不存在或已过期"})
+        snap = {
+            "ok": True, "status": t["status"], "finished": t["finished"],
+            "total": t["total"], "done": t["done"], "current": t["current"],
+            "results": t["results"],
+        }
+    return jsonify(snap)
+
+
+def _apply_sub_fields(sub, body):
+    """把请求体字段写入一组订阅(原地修改并返回)。"""
+    if "name" in body:
+        sub["name"] = str(body["name"]).strip() or sub.get("name") or "未命名订阅"
+    if "symbols" in body:
+        syms = body.get("symbols")
+        if syms is None:
+            sub["symbols"] = None
+        else:
+            norm = []
+            for it in syms:
+                if isinstance(it, dict):
+                    norm.append([str(it.get("symbol", "")).strip(),
+                                 str(it.get("name", "")).strip(),
+                                 str(it.get("category", "custom")).strip()])
+                elif isinstance(it, (list, tuple)):
+                    norm.append([str(it[0]).strip(),
+                                 str(it[1]).strip() if len(it) > 1 else "",
+                                 str(it[2]).strip() if len(it) > 2 else "custom"])
+            sub["symbols"] = [s for s in norm if s[0]]
+    if "include_a500" in body:
+        sub["include_a500"] = bool(body["include_a500"])
+    if "lookback_days" in body:
+        sub["lookback_days"] = max(1, min(int(body["lookback_days"]), 60))
+    if "webhook" in body:
+        sub["webhook"] = str(body["webhook"]).strip()
+    if "email" in body:
+        sub["email"] = str(body["email"]).strip()
+    if "auto_enabled" in body:
+        sub["auto_enabled"] = bool(body["auto_enabled"])
+    if "holdings" in body:
+        sub["holdings"] = _normalize_holdings(body["holdings"])
+    return sub
+
+
+@app.route("/api/notify/subscriptions", methods=["GET"])
+def api_notify_subscriptions():
+    """返回全部订阅列表。"""
+    return jsonify({"ok": True, "subscriptions": _load_subscriptions()})
+
+
+@app.route("/api/notify/subscription", methods=["GET", "POST", "DELETE"])
+def api_notify_subscription():
+    """单组订阅的增改删(按 name 标识)。
+      GET   ?name=xxx       取某组(缺省第一组)
+      POST  {name, ...}     新建或更新(按 name upsert；body 带 old_name 可改名)
+      DELETE ?name=xxx      删除某组
+    """
+    try:
+        if request.method == "GET":
+            name = request.args.get("name", "")
+            sub = _find_subscription(name)
+            if sub is None:
+                return jsonify({"ok": False, "error": "订阅不存在"})
+            return jsonify({"ok": True, "subscription": sub})
+
+        if request.method == "DELETE":
+            name = request.args.get("name", "")
+            subs = _load_subscriptions()
+            rest = [s for s in subs if s["name"] != name]
+            if len(rest) == len(subs):
+                return jsonify({"ok": False, "error": "订阅不存在"})
+            # 删到 0 组时，保存空列表(下次 _load 会回落到默认组，但当前真实反映"已删除")
+            _save_subscriptions(rest)
+            return jsonify({"ok": True, "subscriptions": rest})
+
+        # POST：upsert（唯一标识=接收地址 webhook/email；name 仅展示）
+        body = request.get_json(force=True) or {}
+        subs = _load_subscriptions()
+        # 定位目标：优先 old_name(沿用现有定位逻辑)，否则 name
+        key = str(body.get("old_name") or body.get("name") or "").strip()
+        target = next((s for s in subs if s["name"] == key), None)
+        if target is None:
+            target = _default_subscription(str(body.get("name") or "新订阅").strip() or "新订阅")
+            subs.append(target)
+        _apply_sub_fields(target, body)
+
+        # 唯一性校验：webhook / email 各自不能与其它组重复(空值不校验)
+        others = [s for s in subs if s is not target]
+        new_url = str(target.get("webhook", "")).strip()
+        new_mail = str(target.get("email", "")).strip()
+        if not new_url and not new_mail:
+            return jsonify({"ok": False, "error": "请至少填写一个接收地址（Webhook 或 邮箱）"})
+        if new_url and any(str(s.get("webhook", "")).strip() == new_url for s in others):
+            return jsonify({"ok": False, "error": f"该 Webhook 地址已被其它订阅使用，每个接收地址只能建一个订阅"})
+        if new_mail and any(str(s.get("email", "")).strip() == new_mail for s in others):
+            return jsonify({"ok": False, "error": f"该邮箱已被其它订阅使用，每个接收地址只能建一个订阅"})
+
+        _save_subscriptions(subs)
+        return jsonify({"ok": True, "subscription": target, "subscriptions": subs})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+@app.route("/api/notify/latest")
+def api_notify_latest():
+    return jsonify({"ok": True, "latest": _load_latest()})
+
+
+@app.route("/api/notify/test_webhook", methods=["POST"])
+def api_notify_test_webhook():
+    """测试推送：按当前填写的接收方式(webhook + 邮箱)发送，内容与每日盘后一致。
+    优先用最近一次扫描结果；若还没扫描过，则发一条配置成功的提示。"""
+    body = request.get_json(force=True) or {}
+    url = str(body.get("webhook", "")).strip()
+    mail = str(body.get("email", "")).strip()
+    holdings = _normalize_holdings(body.get("holdings")) \
+        if "holdings" in body else _normalize_holdings(_load_subscription().get("holdings"))
+
+    if not url and not mail:
+        return jsonify({"ok": False, "msg": "请先填写 Webhook 或 邮箱地址"})
+
+    latest = _load_latest()
+    if latest and latest.get("results"):
+        text = "### ✅ trade-notify 测试推送\n" \
+               "以下为最近一次扫描结果(每日盘后推送的内容样式)：\n\n" \
+               + _format_notify_text(latest, holdings=holdings)
+    else:
+        text = "### ✅ trade-notify 测试消息\n你的接收地址配置成功。" \
+               "完成一次「立即扫描」后，每日盘后会推送：⚠️持仓清仓提醒 + 🏆最推荐买入Top10。"
+
+    results = _dispatch_notify({"webhook": url, "email": mail}, text)
+    ok_all = all(ok for _, ok, _ in results) and bool(results)
+    msg = "；".join(f"{ch}:{'成功' if ok else msg}" for ch, ok, msg in results)
+    return jsonify({"ok": ok_all, "msg": msg or "无可用渠道"})
+
+
+def _sub_symbol_codes(sub):
+    """该组订阅关心的标的代码集合(标的 + 持仓)。"""
+    codes = {str(r[0]).strip() for r in _resolve_symbols(sub)}
+    codes |= {c for c, _ in _normalize_holdings(sub.get("holdings"))}
+    return codes
+
+
+def _filter_results_for_sub(all_results, sub):
+    """从全集扫描结果里，筛出该组订阅关心的标的(用于分组推送)。"""
+    codes = _sub_symbol_codes(sub)
+    return [r for r in all_results if str(r.get("symbol")).strip() in codes]
+
+
+# ===== 每日收盘后自动扫描（后台守护线程，best-effort）=====
+def _notify_daily_loop():
+    """每 10 分钟检查：交易日收盘后(15:30+)、今日未跑过，则扫描一次全集，
+    再对每个开启自动的订阅，从全集结果中筛选其标的/持仓后分别推送。"""
+    while True:
+        try:
+            subs = _load_subscriptions()
+            auto_subs = [s for s in subs if s.get("auto_enabled")]
+            if auto_subs:
+                now = datetime.now()
+                after_close = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
+                latest = _load_latest()
+                done_today = latest and latest.get("date") == now.strftime("%Y-%m-%d") \
+                    and latest.get("source") == "auto"
+                if after_close and now.weekday() < 5 and not done_today:
+                    print(f"[notify] 触发每日自动扫描（{len(auto_subs)} 组订阅）…")
+                    # 全集 = 所有开启自动的订阅的标的+持仓并集；lookback 取各组最大值
+                    lb = max((int(s.get("lookback_days", 10)) for s in auto_subs), default=10)
+                    union = {}
+                    for s in auto_subs:
+                        for item in _resolve_symbols(s):
+                            sym, nm, cat = (item + ["", ""])[:3]
+                            union.setdefault(str(sym).strip(), [sym, nm, cat])
+                    all_results = []
+                    for sym, nm, cat in union.values():
+                        try:
+                            r = scan_symbol(sym, nm, cat, lookback_days=lb)
+                            if r.get("has_signal"):
+                                all_results.append(r)
+                        except Exception:
+                            pass
+                    # 全集结果存档(供站内/测试推送复用)
+                    _save_latest(all_results, len(union), lb, source="auto")
+                    # 分组筛选 + 各自推送(webhook + email 都发)
+                    for s in auto_subs:
+                        if not s.get("webhook") and not s.get("email"):
+                            continue
+                        sub_results = _filter_results_for_sub(all_results, s)
+                        payload = {"time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                   "total": len(_sub_symbol_codes(s)),
+                                   "lookback_days": s.get("lookback_days", 10),
+                                   "results": sub_results}
+                        text = _format_notify_text(payload, holdings=s.get("holdings"))
+                        chans = _dispatch_notify(s, text, subject=f"trade-notify｜{s['name']}买卖信号")
+                        ch_txt = ",".join(f"{c}{'✓' if ok else '✗'}" for c, ok, _ in chans)
+                        print(f"[notify] 订阅「{s['name']}」推送：{len(sub_results)} 个有信号 [{ch_txt}]")
+                    print(f"[notify] 自动扫描完成：全集 {len(all_results)}/{len(union)} 个有信号")
+        except Exception as e:
+            print(f"[notify] 自动扫描循环出错（不影响服务）：{e}")
+        time.sleep(600)
+
+
+def _start_notify_daemon():
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("FLASK_DEBUG"):
+        threading.Thread(target=_notify_daily_loop, daemon=True).start()
+
+
 # ===== 启动预热：默认参数的回测 + 寻优 + 三段市场环境（异步，不阻塞启动）=====
 _warmup_done = False
 
 def _warmup():
-    """预热服务端缓存：默认回测参数 + 一键寻优 + 牛熊牛熊三段，新用户打开即秒出。"""
+    """预热服务端缓存：默认回测参数 + 一键寻优 + 牛/熊/牛熊/熊牛四段，新用户打开即秒出。"""
     global _warmup_done
     if _warmup_done:
         return
@@ -328,14 +1036,15 @@ def _warmup():
                         {"type": "donchian_breakout", "period": 20}],
             "exits": [{"type": "ma_break", "period": 20},
                       {"type": "ma_death_cross", "fast": 50, "slow": 200}],
-            "position": {"type": "pe_percentile", "max_leverage": 2.0,
-                         "min_leverage": 0.5, "deleverage_step": 10.0},
+            "position": {"entry": "pe_percentile", "reduce": "pe_percentile",
+                         "max_leverage": 2.0, "min_leverage": 0.5,
+                         "reduce_step": 10.0, "reduce_pct": 10.0},
         })
         ck = _bt_cache_key("sh000300", ten_ago, today, "qfq", 100000, 0.0005, 0.0699, default_cfg.to_dict())
         if _cache_get(ck) is None:
             df = load_kline("sh000300", ten_ago, today, adjust="qfq")
             if df is not None and not df.empty:
-                pe_df = load_pe("sh000300", ten_ago, today)
+                pe_df = load_pe("sh000300", _minus_years(ten_ago, 5), today)
                 pe_series = dict(zip(pe_df["date"], pe_df["pe"])) if pe_df is not None and not pe_df.empty else None
                 r = run_backtest(df, default_cfg, initial_capital=100000, commission=0.0005,
                                  pe_series=pe_series, margin_rate=0.0699)
@@ -355,8 +1064,8 @@ def _warmup():
                 if r.get("ok"):
                     _cache_put(ok_ck, r)
                     print("[warmup] 默认寻优已缓存")
-        # 3. 三段市场环境最佳策略
-        for s, e in [("2019-01-01", "2021-02-18"), ("2021-02-18", "2024-02-01"), ("2019-01-01", "2024-02-01")]:
+        # 3. 四段市场环境最佳策略：牛市 / 熊市 / 一轮牛熊 / 熊牛
+        for s, e in [("2019-01-01", "2021-02-18"), ("2021-02-18", "2024-02-01"), ("2019-01-01", "2024-02-01"), ("2021-02-18", "2026-06-22")]:
             rk = _opt_cache_key("sh000300", s, e, "qfq", 0.0005, 1, 5)
             if _cache_get(rk) is None:
                 df = load_kline("sh000300", s, e, adjust="qfq")
@@ -378,6 +1087,7 @@ def _start_warmup():
 
 
 _start_warmup()
+_start_notify_daemon()
 
 
 if __name__ == "__main__":
