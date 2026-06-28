@@ -12,10 +12,12 @@
 import os
 import json
 import time
+import math
 import threading
 from datetime import datetime, timedelta
 
 from .data import (load_kline, load_pe, load_stock_pe, load_index_current_pe,
+                   load_hk_pe, load_valuation_pe, market_of,
                    INDEX_PE_NAME, INDEX_MARKET_PE, INDEX_LEGU_CSI, CACHE_DIR)
 from .strategy import ENTRY_DEFAULTS, EXIT_DEFAULTS
 from .engine import (_entry_state, _static_exit_state, _atr,
@@ -26,12 +28,14 @@ from .engine import (_entry_state, _static_exit_state, _atr,
 # 同一标的、同一最新交易日(last_date)、同一参数(lookback/adjust/high_window)，
 # 扫描结果只计算一次；出现新 K 线(last_date 变化)才重算。落地 json，重启不丢。
 _SCAN_CACHE_PATH = os.path.join(CACHE_DIR, "scan_results.json")
+# 扫描推荐值/打分逻辑变更时提升版本，避免复用旧扫描结果。
+SCAN_SCORE_VERSION = "2026-06-28-pattern-opt-dual-bt-v1"
 _scan_cache_lock = threading.Lock()
 _scan_cache = None   # 内存镜像：{key: {"last_date":..., "result":...}}
 
 
 def _scan_cache_key(symbol, lookback_days, adjust, high_window):
-    return f"{symbol}|{lookback_days}|{adjust}|{high_window}"
+    return f"{SCAN_SCORE_VERSION}|{symbol}|{lookback_days}|{adjust}|{high_window}"
 
 
 def _load_scan_cache():
@@ -91,6 +95,147 @@ BROAD_INDICES = [
 INDUSTRY_INDICES = []
 A500_INDEX_CODE = "000510"   # 中证A500 指数代码
 
+# ===== 港股 / 美股指数 =====
+HK_INDICES = [
+    ("hkHSI", "恒生指数"),
+    ("hkHSTECH", "恒生科技指数"),
+    ("hkHSCEI", "恒生国企指数"),
+]
+US_INDICES = [
+    ("us.SPX", "标普500"),
+    ("us.NDX", "纳斯达克100"),
+]
+# 港股个股池：流通市值阈值(港币)。1000 亿 = 1e11。
+HK_MIN_MKTCAP = 1e11
+
+
+def get_sp500_constituents(use_cache=True, max_age_days=7):
+    """获取标普500成分股 [[us代码, 名称], ...]，代码为 us+东财格式(如 us105.AAPL)。
+    在线抓取(维基/GitHub双源)拿到纯字母 symbol，再用 akshare 美股 spot 映射成东财代码。
+    本地缓存 7 天，失败返回空列表。
+    """
+    path = os.path.join(CACHE_DIR, "sp500_cons.json")
+    if use_cache and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            if time.time() - d.get("ts", 0) < max_age_days * 86400 and d.get("list"):
+                return d["list"]
+        except Exception:
+            pass
+
+    import pandas as pd
+    import requests
+    import io
+    H = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
+    # 1) 拿纯字母 symbol + 名称(双源兜底)
+    pairs = []   # [(SYMBOL, name), ...]
+    try:
+        r = requests.get("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+                         headers=H, timeout=20)
+        tbl = pd.read_html(io.StringIO(r.text), header=0)[0]
+        for _, row in tbl.iterrows():
+            sym = str(row.get("Symbol", "")).strip().replace(".", "-")
+            nm = str(row.get("Security", "")).strip()
+            if sym:
+                pairs.append((sym, nm))
+    except Exception as e:
+        print(f"[scanner] 维基标普500抓取失败，尝试备用源：{e}")
+    if not pairs:
+        try:
+            r = requests.get("https://raw.githubusercontent.com/datasets/"
+                             "s-and-p-500-companies/main/data/constituents.csv",
+                             headers=H, timeout=20)
+            tbl = pd.read_csv(io.StringIO(r.text))
+            for _, row in tbl.iterrows():
+                sym = str(row.get("Symbol", "")).strip()
+                nm = str(row.get("Security", "")).strip()
+                if sym:
+                    pairs.append((sym, nm))
+        except Exception as e:
+            print(f"[scanner] GitHub标普500抓取失败：{e}")
+
+    if not pairs:
+        return []
+
+    # 2) 用 akshare 美股 spot 把纯字母 symbol 映射成东财代码(105.AAPL)
+    out = []
+    try:
+        import akshare as ak
+        spot = ak.stock_us_spot_em()
+        # 东财代码形如 105.AAPL，截取 . 后的纯符号建索引
+        sym2full = {}
+        for _, r in spot[["代码", "名称"]].iterrows():
+            full = str(r["代码"]).strip()
+            pure = full.split(".")[-1].upper()
+            sym2full.setdefault(pure, (full, str(r["名称"]).strip()))
+        for sym, nm in pairs:
+            hit = sym2full.get(sym.upper())
+            if hit:
+                out.append([f"us{hit[0]}", nm or hit[1]])
+    except Exception as e:
+        print(f"[scanner] 标普500代码映射失败：{e}")
+
+    if out:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"ts": time.time(), "list": out}, f, ensure_ascii=False)
+        except Exception:
+            pass
+    return out
+
+
+def get_hk_large_caps(use_cache=True, max_age_days=7, min_mktcap=HK_MIN_MKTCAP):
+    """获取流通市值≥min_mktcap(港币)的港股 [[hk代码, 名称], ...]，代码为 hk+5位(如 hk00700)。
+    用东财港股列表 API(f21=流通市值)筛选。本地缓存 7 天，失败返回空列表。
+    """
+    path = os.path.join(CACHE_DIR, "hk_largecap_cons.json")
+    if use_cache and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            if time.time() - d.get("ts", 0) < max_age_days * 86400 and d.get("list"):
+                return d["list"]
+        except Exception:
+            pass
+
+    out = []
+    try:
+        import requests
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "pn": "1", "pz": "500", "po": "1", "np": "1", "fltt": "2", "invt": "2",
+            "fs": "m:128+t:3,m:128+t:4,m:128+t:1,m:128+t:2",  # 港股主板各板块
+            "fields": "f12,f14,f21", "fid": "f21",            # f21=流通市值，按其降序
+        }
+        r = requests.get(url, params=params, timeout=20,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        data = (r.json() or {}).get("data") or {}
+        for x in (data.get("diff") or []):
+            code = str(x.get("f12", "")).strip()
+            name = str(x.get("f14", "")).strip()
+            mcap = x.get("f21")
+            try:
+                mcap = float(mcap)
+            except (TypeError, ValueError):
+                continue
+            if code and mcap >= min_mktcap:
+                out.append([f"hk{code}", name or code])
+            elif mcap < min_mktcap:
+                # 已按 f21 降序，遇到第一个不达标即可停止
+                break
+    except Exception as e:
+        print(f"[scanner] 获取港股大市值成分失败：{e}")
+
+    if out:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"ts": time.time(), "list": out}, f, ensure_ascii=False)
+        except Exception:
+            pass
+    return out
+
 
 def get_a500_constituents(use_cache=True, max_age_days=7):
     """获取中证A500成分股 [[code, name], ...]，本地缓存 7 天。失败返回空列表。"""
@@ -147,13 +292,23 @@ def get_a500_constituents(use_cache=True, max_age_days=7):
     return out
 
 
-def default_symbols(include_a500=True):
-    """默认监听标的：宽基 + 行业 + (可选)中证A500成分股。
-    返回 [[symbol, name, category], ...]"""
+def default_symbols(include_a500=True, include_sp500=False, include_hk_large=False):
+    """默认监听标的：A股宽基 + (可选)中证A500成分股 + (可选)港美指数/成分股。
+    返回 [[symbol, name, category], ...]
+      category: broad(A股宽基) / a500(A500成分) /
+                hk_index / hk(港股成分) / us_index / sp500(标普成分)
+    """
     syms = [[c, n, "broad"] for c, n in BROAD_INDICES]
     syms += [[c, n, "industry"] for c, n in INDUSTRY_INDICES]
+    # 港美指数默认纳入(轻量，5个)
+    syms += [[c, n, "hk_index"] for c, n in HK_INDICES]
+    syms += [[c, n, "us_index"] for c, n in US_INDICES]
     if include_a500:
         syms += [[c, n, "a500"] for c, n in get_a500_constituents()]
+    if include_sp500:
+        syms += [[c, n, "sp500"] for c, n in get_sp500_constituents()]
+    if include_hk_large:
+        syms += [[c, n, "hk"] for c, n in get_hk_large_caps()]
     return syms
 
 
@@ -191,25 +346,25 @@ def _suggest_position(pe_info, has_entry, has_exit):
 
 
 def _score_level(score):
-    """推荐买入分 -> 文字档位。"""
-    if score >= 75:
-        return "强烈推荐"
-    if score >= 60:
-        return "偏多关注"
-    if score >= 45:
-        return "中性"
-    if score >= 30:
-        return "偏空谨慎"
-    return "建议回避"
+    """推荐值 -> 文字档位。零轴制：>0 推荐买入，<0 建议卖出。"""
+    if score > 20:
+        return "强烈推荐买入"
+    if score > 0:
+        return "推荐买入"
+    if score < -20:
+        return "强烈建议卖出"
+    if score < 0:
+        return "建议卖出"
+    return "中性观望"
 
 
 def _recommend_score(entries, exits, pe_info, lookback_days):
-    """综合「推荐买入」打分（0~100，基准 50 中性）。
+    """综合「推荐值」打分（零轴制，>0 推荐买入，<0 建议卖出）。
 
-    加分项(看多)：有买入信号、买入信号越多、买入信号距今越近、估值分位越低。
-    减分项(看空)：有卖出信号、卖出信号越多、卖出信号距今越近、估值分位越高、PE绝对值过高(>30)。
+    交易分数：只买入=正分，只卖出=负分，买卖信号同时出现=0（价格行为混乱，不做方向判断）。
+    估值分数：分位越低越加分，分位越高/PE绝对值过高越减分。
 
-    返回 {score, level, buy, sell, valuation, pe_penalty} —— 各部分贡献(便于展示/排序)。
+    返回 {score, level, trade, valuation, buy, sell, conflict, valuation_pct, valuation_abs} —— 各部分贡献(便于展示/排序)。
     """
     lb = max(1, int(lookback_days or 10))
 
@@ -224,36 +379,59 @@ def _recommend_score(entries, exits, pe_info, lookback_days):
     buy_score = round(min(buy_raw * 12.0, 50.0), 1)
     sell_score = round(min(sell_raw * 12.0, 50.0), 1)
 
-    # 估值贡献 = 分位项 + PE绝对值惩罚。
-    # ① 分位项：近5年分位线性映射到 [-20, +20]，分位 0%→+20，100%→-20。
-    #    无长历史分位(中证A500/无PE)记 0，不影响信号方向。
-    # ② PE绝对值惩罚：PE 超过 30 后，每多 10 PE 扣 1 分（线性，封顶 -15）。
-    #    哪怕分位很低，PE 本身过高(如 30/40/50)也要降温，避免"贵但便宜"假象。
-    pct_score = 0.0
+    # 估值分数：分数越高代表估值越便宜，最终区间 [-25, 25]。
+    # PE5YPercentile 占 80% 权重，PE 绝对值占 20% 权重。
+    # - 分位项：0% -> +25，50% -> 0，100% -> -25。
+    # - PE项：PE=20 -> 0；PE越低越高，越高越低，限制在 [-25, 25]；PE<=0 记为 -10。
+    # - 两项都有：0.8 * 分位项 + 0.2 * PE项；只有 PE 时使用 PE项；无 PE 时为 0。
+    def _clamp(v, lo=-25.0, hi=25.0):
+        return max(lo, min(hi, v))
+
+    pct_score = None
+    pe_score = None
     if pe_info and pe_info.get("percentile") is not None:
         p = float(pe_info["percentile"])
-        pct_score = round((50.0 - p) / 50.0 * 20.0, 1)
+        pct_score = _clamp((50.0 - p) / 2.0)
 
-    pe_penalty = 0.0
     if pe_info and pe_info.get("pe") is not None:
         try:
             pe_abs = float(pe_info["pe"])
-            if pe_abs > 30:
-                pe_penalty = round(min((pe_abs - 30.0) / 10.0, 15.0), 1)
+            pe_score = -10.0 if pe_abs <= 0 else _clamp(-25.0 * math.log10(pe_abs / 20.0))
         except (TypeError, ValueError):
-            pe_penalty = 0.0
+            pe_score = None
 
-    val_score = round(pct_score - pe_penalty, 1)
+    if pct_score is not None and pe_score is not None:
+        val_score = round(0.8 * pct_score + 0.2 * pe_score, 1)
+    elif pct_score is not None:
+        val_score = round(pct_score, 1)
+    elif pe_score is not None:
+        val_score = round(pe_score, 1)
+    else:
+        val_score = 0.0
 
-    raw = 50.0 + buy_score - sell_score + val_score
-    score = int(max(0, min(100, round(raw))))
+    has_buy = bool(entries)
+    has_sell = bool(exits)
+    conflict = has_buy and has_sell
+    if conflict:
+        trade_score = 0.0
+    elif has_buy:
+        trade_score = buy_score
+    elif has_sell:
+        trade_score = -sell_score
+    else:
+        trade_score = 0.0
+
+    score = round(trade_score + val_score, 1)
     return {
         "score": score,
         "level": _score_level(score),
+        "trade": round(trade_score, 1),
+        "valuation": val_score,
         "buy": buy_score,
         "sell": sell_score,
-        "valuation": val_score,
-        "pe_penalty": pe_penalty,
+        "conflict": conflict,
+        "valuation_pct": round(pct_score, 2) if pct_score is not None else None,
+        "valuation_pe": round(pe_score, 2) if pe_score is not None else None,
     }
 
 
@@ -296,7 +474,29 @@ def _resolve_pe_info(symbol, dates, today, n):
     if cur is not None:
         return {"pe": round(cur, 2), "percentile": None, "level": "—"}
 
-    # 3) 个股(A500成分股等)：百度 TTM PE 近5年分位
+    mkt = market_of(symbol)
+
+    # 3) 港股个股：百度港股 TTM PE -> 近若干年分位
+    if mkt == "hk":
+        body = symbol[2:] if low.startswith("hk") else symbol
+        if body.isdigit():
+            try:
+                return _from_series(load_hk_pe)
+            except Exception as e:
+                print(f"[scanner] {symbol} 港股PE取数失败：{e}")
+        return None
+
+    # 4) 美股：统一估值入口。
+    # 美股个股走 moomoo/Futu 估值接口；美股指数(us.SPX/us.NDX)走 WorldPERatio。
+    # 注意：scan_symbol 只会在有买卖信号时调用本函数，避免 500+ 成分股全量估值拖慢扫描。
+    if mkt == "us":
+        try:
+            return _from_series(load_valuation_pe)
+        except Exception as e:
+            print(f"[scanner] {symbol} 美股PE取数失败：{e}")
+        return None
+
+    # 5) A股个股(A500成分股等)：百度 TTM PE 近5年分位
     if symbol.isdigit():
         try:
             return _from_series(load_stock_pe)
@@ -398,8 +598,11 @@ def scan_symbol(symbol, name="", category="", lookback_days=10,
         exit_hits.append({"type": "trailing_pct", "label": _exit_label(trail, ctx, i),
                           "date": dates[i], "days_ago": n - 1 - i})
 
+    has_signal = bool(entry_hits or exit_hits)
+
     # ---- 当前估值(PE 近5年分位) ----
-    pe_info = _resolve_pe_info(symbol, dates, today, n)
+    # 扫描列表只展示有买卖信号的标的；无信号标的不计算估值，避免 500+ 成分股扫描时被 PE 接口拖慢。
+    pe_info = _resolve_pe_info(symbol, dates, today, n) if has_signal else None
 
     suggest = _suggest_position(pe_info, bool(entry_hits), bool(exit_hits))
 
@@ -407,7 +610,7 @@ def scan_symbol(symbol, name="", category="", lookback_days=10,
     entry_hits.sort(key=lambda x: x["days_ago"])
     exit_hits.sort(key=lambda x: x["days_ago"])
 
-    # 综合「推荐买入」打分(0~100)
+    # 综合「推荐值」打分（零轴制）
     score = _recommend_score(entry_hits, exit_hits, pe_info, lookback_days)
 
     result = {
@@ -415,7 +618,7 @@ def scan_symbol(symbol, name="", category="", lookback_days=10,
         "last_date": dates[-1], "last_close": round(closes[-1], 3),
         "pe": pe_info, "suggest": suggest, "score": score,
         "entries": entry_hits, "exits": exit_hits,
-        "has_signal": bool(entry_hits or exit_hits),
+        "has_signal": has_signal,
     }
     # 写入扫描结果缓存(记录最新交易日 + 写入当天)，供同一自然日内复用
     _scan_cache_put(ck, last_date, today, result)

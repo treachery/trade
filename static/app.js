@@ -3,8 +3,19 @@ const kChart = echarts.init($("kchart"), "dark");
 const eChart = echarts.init($("echart"), "dark");
 window.addEventListener("resize", () => { kChart.resize(); eChart.resize(); });
 
+// ===== 市场 / 币种：按代码前缀自适应（A股¥ / 港股HK$ / 美股US$）=====
+function marketOf(sym) {
+  const s = (sym || "").trim().toLowerCase();
+  if (s.startsWith("hk")) return "hk";
+  if (s.startsWith("us")) return "us";
+  return "cn";
+}
+const CCY = { cn: "¥", hk: "HK$", us: "US$" };
+function ccyOf(sym) { return CCY[marketOf(sym)] || "¥"; }
+let _curCcy = "¥";   // 当前回测标的的币种符号（渲染金额时使用）
+
 function fmtMoney(v) {
-  return "¥" + Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+  return _curCcy + Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 0 });
 }
 function signClass(v) { return v >= 0 ? "pos" : "neg"; }
 
@@ -16,6 +27,7 @@ function renderStats(stats) {
     { k: "期末资金", v: fmtMoney(stats.final_equity), c: signClass(stats.total_return) },
     { k: "交易次数", v: stats.num_trades, c: "" },
     { k: "胜率", v: stats.win_rate + "%", c: "" },
+    { k: `超短交易(≤${stats.short_holding_days || 3}日)`, v: `${stats.short_trade_rate || 0}% (${stats.short_trade_count || 0}笔)`, c: (stats.short_trade_count || 0) > 0 ? "neg" : "" },
     { k: "单笔平均收益", v: stats.avg_return + "%", c: signClass(stats.avg_return) },
     { k: "最大回撤", v: stats.max_drawdown + "%", c: "neg" },
   ];
@@ -103,6 +115,30 @@ function renderEquityChart(data) {
   }, true);
 }
 
+function applyScan5yPreset() {
+  applyConfig(["donchian_breakout", "ma_bull_stack"], "or", ["trailing_pct", "donchian_exit"], "and");
+  document.querySelectorAll('input[name="entryLogic"]').forEach(r => { r.checked = r.value === "or"; });
+  document.querySelectorAll('input[name="exitLogic"]').forEach(r => { r.checked = r.value === "and"; });
+  if ($("entryWindow")) $("entryWindow").value = 5;
+  if ($("exitWindow")) $("exitWindow").value = 5;
+  if ($("posEntryType")) $("posEntryType").value = "fixed";
+  if ($("posReduceType")) $("posReduceType").value = "none";
+  if ($("posMaxLev")) $("posMaxLev").value = 1;
+  if ($("posMinLev")) $("posMinLev").value = 1;
+  if ($("stopLossPct")) $("stopLossPct").value = 10;
+}
+
+function initFromUrlParams() {
+  const qs = new URLSearchParams(window.location.search);
+  const sym = qs.get("symbol");
+  if (sym) $("symbol").value = sym;
+  const st = qs.get("start");
+  if (st) $("start").value = st;
+  const ed = qs.get("end");
+  if (ed) $("end").value = ed;
+  if (qs.get("preset") === "scan5y") applyScan5yPreset();
+}
+
 function renderTrades(trades) {
   const tbody = document.querySelector("#trades tbody");
   if (!trades.length) {
@@ -175,7 +211,9 @@ function renderTrades(trades) {
 
 // ===== 请求缓存：参数未变则不重复请求后端，用本地数据重新渲染（带1s载入动效）=====
 const _cache = { backtest: null, optimize: {} };  // optimize 按 symbol+start+end 缓存
-function _payloadKey(p) { return JSON.stringify(p); }
+const DATA_SOURCE_VERSION = "2026-06-28-or-entry-fix-v1";
+const OPT_SCORE_VERSION = "2026-06-28-filter-return15-v1";
+function _payloadKey(p) { return JSON.stringify({ v: DATA_SOURCE_VERSION, ...p }); }
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // 判断是否被限流，弹窗提示
@@ -254,6 +292,7 @@ async function runBacktest() {
     reduce: $("posReduceType").value,
     max_leverage: parseFloat($("posMaxLev").value),
     min_leverage: parseFloat($("posMinLev").value),
+    reduce_start: parseFloat($("posReduceStart").value),
     reduce_step: parseFloat($("posReduceStep").value),
     reduce_pct: parseFloat($("posReducePct").value),
   };
@@ -273,6 +312,7 @@ async function runBacktest() {
       exit_window: parseInt($("exitWindow").value) || 5,
       entries,
       exits,
+      stop_loss_pct: parseFloat($("stopLossPct").value) || 0,
       position,
     }
   };
@@ -287,6 +327,7 @@ async function runBacktest() {
     await _sleep(1000);
     _hideLoading();
     const data = _cache.backtest.data;
+    _curCcy = ccyOf(data.meta.symbol);
     renderStats(data.stats);
     renderKChart(data);
     renderEquityChart(data);
@@ -320,6 +361,7 @@ async function runBacktest() {
       return;
     }
     _cache.backtest = { key: pkey, data };
+    _curCcy = ccyOf(data.meta.symbol);
     renderStats(data.stats);
     renderKChart(data);
     renderEquityChart(data);
@@ -381,18 +423,20 @@ function renderOpt(res) {
       <td class="neg">${r.max_drawdown}%</td>
       <td>${r.trades}</td>
       <td>${r.win_rate}%</td>
+      <td class="${(r.short_trade_rate || 0) > 0 ? "neg" : ""}">${r.short_trade_rate || 0}%</td>
+      <td>${Math.round((r.avg_position_ratio || 0) * 100)}%</td>
       <td class="combo">${r.entry} <span class="arrow">→</span> ${r.exit}</td>
       <td><button class="apply-btn" data-i="${i}">载入</button></td>
     </tr>`;
   }).join("");
   wrap.innerHTML = `
     <div class="opt-head">
-      <h2>寻优 Top10 <span class="sub">综合评分 = 0.35×夏普 + 0.25×卡玛 + 0.25×超额年化 + 0.15×(回撤越小越好)，按z-score</span></h2>
-      <div class="opt-meta">共 ${res.total_combos} 组合 → 去重后 ${res.unique_combos} 个(已按最小原则去掉绩效重复的冗余组合) · 评分池(交易≥${res.min_trades}) ${res.scored_pool} 个 · 同期买入持有 ${bh.buy_hold_return}%（年化${bh.buy_hold_annualized}%）</div>
+      <h2>寻优 Top10 <span class="sub">综合评分 = (0.35×卡玛分 + 0.30×夏普分 + 0.20×${res.return_basis === "annual" ? "年化" : "超额年化"}分 + 0.15×资金效率分) × 回撤惩罚 × 超短单惩罚（子项 clamp[-1,1]：卡玛/2、夏普/2、收益/15%、(年化/平均持仓)/50%；回撤惩罚=max(0.2, (1-最大回撤幅度)²)；超短单惩罚=max(0.5, 1-超短≤3日占比)）</span></h2>
+      <div class="opt-meta">共 ${res.total_combos} 组合 → 去重后 ${res.unique_combos} 个 · 准入门槛(夏普≥${(res.filters || {}).sharpe_min ?? 0.5}·卡玛≥${(res.filters || {}).calmar_min ?? 0.3}·回撤≤${(res.filters || {}).mdd_max ?? 35}%·交易≥${res.min_trades}) → 合格 ${res.scored_pool} 个${(res.filters || {}).fallback ? "（无策略达标，已放宽为仅交易门槛）" : ""} · 收益基准：${res.return_basis === "annual" ? "年化收益率" : "超额年化"} · 同期买入持有 ${bh.buy_hold_return}%（年化${bh.buy_hold_annualized}%）</div>
     </div>
     <table class="opt-table">
       <thead><tr>
-        <th>#</th><th>综合分</th><th>总回报</th><th>超额(vs大盘)</th><th>年化</th><th>夏普</th><th>卡玛</th><th>最大回撤</th><th>交易</th><th>胜率</th><th>入场 → 出场</th><th></th>
+        <th>#</th><th>综合分</th><th>总回报</th><th>超额(vs大盘)</th><th>年化</th><th>夏普</th><th>卡玛</th><th>最大回撤</th><th>交易</th><th>胜率</th><th>超短≤3日</th><th>平均持仓</th><th>入场 → 出场</th><th></th>
       </tr></thead>
       <tbody>${rowsHtml}</tbody>
     </table>`;
@@ -414,6 +458,7 @@ async function runOptimize() {
   status.className = "status";
   status.textContent = "正在跑全部 3249 个组合…（约几秒）";
 
+  const returnBasis = ($("optReturnBasis") && $("optReturnBasis").value) || "excess";
   const payload = {
     symbol: $("symbol").value.trim(),
     start: $("start").value,
@@ -423,8 +468,9 @@ async function runOptimize() {
     commission: parseFloat($("commission").value),
     top_n: 10,
     min_trades: 10,
+    return_basis: returnBasis,
   };
-  const okey = `${payload.symbol}|${payload.start}|${payload.end}|${payload.adjust}|${payload.commission}`;
+  const okey = `${OPT_SCORE_VERSION}|${payload.symbol}|${payload.start}|${payload.end}|${payload.adjust}|${payload.commission}|${returnBasis}`;
 
   // 参数未变 → 用缓存渲染
   if (_cache.optimize[okey]) {
@@ -492,6 +538,11 @@ const REGIMES = [
   { key: "bear", name: "熊市最佳", start: "2021-02-18", end: "2024-02-01", cls: "regime-bear" },
   { key: "cycle", name: "牛转熊最佳", start: "2019-01-01", end: "2024-02-01", cls: "regime-cycle" },
   { key: "bearbull", name: "熊转牛最佳", start: "2021-02-18", end: "2026-06-22", cls: "regime-bearbull" },
+  {
+    key: "decade", name: "十年最佳", cls: "regime-decade",
+    start: localYMD(new Date(new Date().getFullYear() - 10, new Date().getMonth(), new Date().getDate())),
+    end: localYMD(new Date()),
+  },
 ];
 
 function loadRegime(reg, top) {
@@ -503,18 +554,20 @@ function loadRegime(reg, top) {
 }
 
 const REGIME_LABEL = "🎯 跑 牛市/熊市/牛熊/熊牛 最佳策略";
+// 市场环境最佳策略固定以创业板指(sz399006)为基准寻优，不跟随主页输入框标的。
+const REGIME_SYMBOL = "sz399006";
 
 async function runRegimes() {
   const wrap = $("regimeWrap");
   const btn = $("regimeBtn") || $("regimeBtn2");
-  const symbol = $("symbol").value.trim();
+  const symbol = REGIME_SYMBOL;
   wrap.style.display = "";
   if (btn) { btn.disabled = true; btn.textContent = "正在跑四种市场环境…（约二十秒）"; }
 
   _showLoading("正在跑四种市场环境最佳策略…");
   const results = [];
   for (const reg of REGIMES) {
-    const okey = `${symbol}|${reg.start}|${reg.end}|${$("adjust").value}|${$("commission").value}`;
+    const okey = `${OPT_SCORE_VERSION}|${symbol}|${reg.start}|${reg.end}|${$("adjust").value}|${$("commission").value}|excess`;
     let data;
     if (_cache.optimize[okey]) {
       data = _cache.optimize[okey];
@@ -561,6 +614,8 @@ async function runRegimes() {
         <span>卡玛 ${t.calmar}</span>
         <span>回撤 <b class="neg">${t.max_drawdown}%</b></span>
         <span>交易 ${t.trades}</span>
+        <span>胜率 ${t.win_rate}%</span>
+        <span>超短≤3日 <b class="${(t.short_trade_rate || 0) > 0 ? "neg" : ""}">${t.short_trade_rate || 0}%</b></span>
       </div>
       <div class="rg-foot">同期买入持有 ${bh.buy_hold_return}% · <button class="rg-load" data-idx="${idx}">直接载入</button></div>
     </div>`;
@@ -608,6 +663,7 @@ $("optBtn").addEventListener("click", runOptimize);
 function updatePosUI() {
   const reduce = $("posReduceType").value;
   const rowStep = $("rowReduceStep");
+  const lblStart = $("lblReduceStart");
   const lblStep = $("lblReduceStep");
   const lblPct = $("lblReducePct");
   if (reduce === "none") {
@@ -615,9 +671,11 @@ function updatePosUI() {
   } else {
     rowStep.style.display = "";
     if (reduce === "profit") {
+      lblStart.firstChild.textContent = "上涨起步点(%)";
       lblStep.firstChild.textContent = "上涨步长(%)";
       lblPct.style.display = "";
     } else {  // pe_percentile
+      lblStart.firstChild.textContent = "PE起步点(百分位)";
       lblStep.firstChild.textContent = "PE上升步长(百分位点)";
       lblPct.style.display = "none";
     }
@@ -716,5 +774,9 @@ async function submitFeedback() {
 }
 
 initFeedback();
-// 首次自动跑一次默认示例
+initFromUrlParams();
+updatePosUI();
+updateEntryWindowUI();
+updateExitWindowUI();
+// 首次自动跑一次默认示例；若 URL 带 symbol/start/end/preset，则自动跑对应回测。
 runBacktest();

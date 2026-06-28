@@ -27,3 +27,7 @@ _deploy/
 .env.*
 *.token
 secrets/
+
+# 与项目无关的本地技能包/临时压缩包
+opend-skills.zip
+*.zip

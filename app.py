@@ -14,15 +14,18 @@ import traceback
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict, deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from flask import Flask, render_template, request, jsonify
 
-from backtest import load_kline, load_pe, run_backtest, run_optimization, StrategyConfig, INDEX_PE_PROXY
+from backtest import (load_kline, load_pe, load_valuation_pe, run_backtest,
+                      run_optimization, StrategyConfig, INDEX_PE_PROXY,
+                      ENTRY_DEFAULTS, EXIT_DEFAULTS, CN_LABEL)
 from backtest.scanner import (scan_symbol, default_symbols, get_a500_constituents,
-                              BROAD_INDICES, INDUSTRY_INDICES)
+                              get_sp500_constituents, get_hk_large_caps,
+                              BROAD_INDICES, INDUSTRY_INDICES, HK_INDICES, US_INDICES)
 from backtest.data import CACHE_DIR
 
 app = Flask(__name__)
@@ -41,6 +44,10 @@ def _minus_years(date_str, years):
 
 
 # ===== 服务端 LRU 缓存：最多100组回测/寻优结果，避免重复计算 =====
+# 数据源/估值逻辑变更时提升版本，避免命中旧 PE 可用性结果。
+DATA_SOURCE_VERSION = "2026-06-28-or-entry-fix-v1"
+# 寻优打分逻辑变更时提升版本，避免命中旧评分结果。
+OPT_SCORE_VERSION = "2026-06-28-filter-return15-v1"
 _SERVER_CACHE = OrderedDict()
 _SERVER_CACHE_MAX = 100
 _cache_lock = threading.Lock()
@@ -65,16 +72,18 @@ def _cache_put(key, val):
 def _bt_cache_key(symbol, start, end, adjust, initial_capital, commission, margin_rate, config_dict):
     """回测缓存键：规范化所有参数，保证相同参数命中同一缓存。"""
     return "bt:" + json.dumps({
+        "v": DATA_SOURCE_VERSION,
         "s": symbol, "st": start, "e": end, "a": adjust,
         "ic": round(initial_capital, 2), "cm": round(commission, 6),
         "mr": round(margin_rate, 6), "cfg": config_dict,
     }, sort_keys=True, ensure_ascii=False)
 
 
-def _opt_cache_key(symbol, start, end, adjust, commission, top_n, min_trades):
+def _opt_cache_key(symbol, start, end, adjust, commission, top_n, min_trades, return_basis="excess"):
     return "opt:" + json.dumps({
+        "v": OPT_SCORE_VERSION,
         "s": symbol, "st": start, "e": end, "a": adjust,
-        "cm": round(commission, 6), "tn": top_n, "mt": min_trades,
+        "cm": round(commission, 6), "tn": top_n, "mt": min_trades, "rb": return_basis,
     }, sort_keys=True, ensure_ascii=False)
 
 
@@ -163,6 +172,7 @@ _DISABLE_RATE_LIMIT = os.environ.get("DISABLE_RATE_LIMIT", "") == "1"
 # (回测/寻优/扫描启动/推送/订阅写入)。
 _RATE_EXEMPT_PATHS = {
     "/api/notify/scan_status",   # 扫描进度轮询(高频)
+    "/api/notify/scan_cancel",   # 取消当前扫描任务
     "/api/notify/latest",        # 读取最近一次扫描结果
     "/api/notify/symbols",       # 读取可选标的列表
     "/api/notify/subscriptions", # 读取订阅列表
@@ -266,7 +276,8 @@ def api_backtest():
         pos = config.position
         need_pe = pos.get("entry") == "pe_percentile" or pos.get("reduce") == "pe_percentile"
         if need_pe:
-            pe_df = load_pe(symbol, _minus_years(start, 5), end)
+            # 统一估值入口：A股指数/A股个股/港股个股均可取近5年分位；港股指数/美股退化满仓
+            pe_df = load_valuation_pe(symbol, _minus_years(start, 5), end)
             if pe_df is not None and not pe_df.empty:
                 pe_series = dict(zip(pe_df["date"], pe_df["pe"]))
                 pe_available = True
@@ -275,6 +286,7 @@ def api_backtest():
                               commission=commission, pe_series=pe_series,
                               margin_rate=margin_rate)
         result["meta"] = {
+            "data_source_version": DATA_SOURCE_VERSION,
             "symbol": symbol,
             "start": start,
             "end": end,
@@ -306,9 +318,12 @@ def api_optimize():
         commission = float(body.get("commission", 0.0005))
         top_n = int(body.get("top_n", 10))
         min_trades = int(body.get("min_trades", 10))
+        return_basis = str(body.get("return_basis", "excess")).strip().lower()
+        if return_basis not in ("excess", "annual"):
+            return_basis = "excess"
 
         # 服务端缓存命中 → 直接返回
-        ck = _opt_cache_key(symbol, start, end, adjust, commission, top_n, min_trades)
+        ck = _opt_cache_key(symbol, start, end, adjust, commission, top_n, min_trades, return_basis)
         cached = _cache_get(ck)
         if cached is not None:
             return jsonify(cached)
@@ -318,8 +333,9 @@ def api_optimize():
             return jsonify({"ok": False, "error": f"未获取到 {symbol} 在 {start}~{end} 的数据。"})
 
         result = run_optimization(df, initial_capital=initial_capital, commission=commission,
-                                  top_n=top_n, min_trades=min_trades)
-        result["meta"] = {"symbol": symbol, "start": start, "end": end, "rows": len(df)}
+                                  top_n=top_n, min_trades=min_trades, return_basis=return_basis)
+        result["meta"] = {"symbol": symbol, "start": start, "end": end, "rows": len(df),
+                          "opt_score_version": OPT_SCORE_VERSION}
         if result.get("ok"):
             _cache_put(ck, result)
         return jsonify(result)
@@ -396,6 +412,8 @@ def _default_subscription(name="默认订阅"):
         "name": name,           # 订阅名(仅展示)
         "symbols": None,        # None 表示用默认标的（含A500，动态获取）
         "include_a500": True,
+        "include_sp500": False,
+        "include_hk": False,
         "lookback_days": 10,
         "webhook": "",          # 接收地址之一：webhook URL
         "email": "",            # 接收地址之一：邮箱(SMTP 发送)
@@ -497,15 +515,252 @@ def _resolve_symbols(sub):
                 cat = str(it[2]).strip() if len(it) >= 3 else "custom"
                 out.append([code, name, cat])
     if not out:
-        out = list(default_symbols(include_a500=sub.get("include_a500", True)))
+        out = list(default_symbols(
+            include_a500=sub.get("include_a500", True),
+            include_sp500=sub.get("include_sp500", False),
+            include_hk_large=sub.get("include_hk", False),
+        ))
+
+    # 保存的 symbols 通常只含指数/自定义；成分股由开关动态展开，避免把数百只股票写进订阅文件。
+    have = {str(r[0]).strip() for r in out}
+    def _append_dynamic(items, cat):
+        for code, name in items:
+            code = str(code).strip()
+            if code and code not in have:
+                out.append([code, name, cat])
+                have.add(code)
+
+    if sub.get("include_a500", True):
+        _append_dynamic(get_a500_constituents(), "a500")
+    if sub.get("include_sp500", False):
+        _append_dynamic(get_sp500_constituents(), "sp500")
+    if sub.get("include_hk", False):
+        _append_dynamic(get_hk_large_caps(), "hk")
 
     # 并入持仓标的(去重)：持仓里若有不在列表中的票，补进来并标记 category=holding
-    have = {str(r[0]).strip() for r in out}
     for code, name in _normalize_holdings(sub.get("holdings")):
         if code not in have:
             out.append([code, name, "holding"])
             have.add(code)
     return out
+
+
+def _scan_default_backtest_config():
+    """信号扫描 Top10 附加回测使用的固定策略：唐奇安突破/均线多头排列 → 移动止盈&唐奇安下轨。"""
+    return StrategyConfig.from_dict({
+        "entry_logic": "or",
+        "exit_logic": "and",
+        "entry_window": 5,
+        "exit_window": 5,
+        "stop_loss_pct": 10.0,
+        "entries": [
+            {"type": "donchian_breakout", "period": 20},
+            {"type": "ma_bull_stack", "periods": [5, 10, 20, 60]},
+        ],
+        "exits": [
+            {"type": "trailing_pct", "pct": 10},
+            {"type": "donchian_exit", "period": 10},
+        ],
+        "position": {"entry": "fixed", "reduce": "none", "max_leverage": 1.0,
+                     "min_leverage": 1.0, "reduce_start": 50.0,
+                     "reduce_step": 10.0, "reduce_pct": 10.0},
+    })
+
+
+# ===== 形态判断 + 形态→策略映射（用于扫描 Top10 的"形态推荐策略"组）=====
+def _detect_pattern(df):
+    """根据近5年走势判断形态：长牛/长熊/牛熊/熊牛/震荡。
+
+    取样：起点、终点、最高、最低，并每约3个月(63交易日)采样一个收盘点；
+    依据总涨跌幅、最高/最低出现的相对位置(前半段 vs 后半段)综合判断。
+    返回 (pattern_key, pattern_label)。
+    """
+    closes = df["close"].tolist()
+    n = len(closes)
+    if n < 60:
+        return "range", "震荡"
+    first, last = closes[0], closes[-1]
+    hi = max(closes)
+    lo = min(closes)
+    hi_idx = closes.index(hi)
+    lo_idx = closes.index(lo)
+    total_chg = (last / first - 1) if first > 0 else 0.0           # 区间总涨跌幅
+    amplitude = (hi / lo - 1) if lo > 0 else 0.0                    # 峰谷振幅
+    half = n / 2.0
+    hi_late = hi_idx >= half      # 最高点在后半段
+    lo_late = lo_idx >= half      # 最低点在后半段
+
+    # 阈值：±35% 视为单边趋势；振幅大但首尾变化小视为震荡
+    UP, DOWN = 0.35, -0.35
+    if total_chg >= UP and not hi_late and lo_idx < hi_idx:
+        # 先低后高、终点接近高位但高点偏早 → 牛转熊(冲高回落)
+        return ("cycle", "牛转熊") if (hi - last) / hi > 0.15 else ("bull", "长牛")
+    if total_chg >= UP:
+        return "bull", "长牛"
+    if total_chg <= DOWN and lo_late:
+        return "bear", "长熊"
+    if total_chg <= DOWN:
+        # 跌幅大但最低点偏早、终点回升 → 熊转牛
+        return ("bearbull", "熊转牛") if (last - lo) / lo > 0.15 else ("bear", "长熊")
+    # 首尾变化不大：看后半段相对前半段方向区分 熊牛/牛熊/震荡
+    if lo_late and (last - lo) / max(lo, 1e-9) > 0.15:
+        return "bearbull", "熊转牛"
+    if hi_late and (hi - last) / max(hi, 1e-9) > 0.15:
+        return "cycle", "牛转熊"
+    return "range", "震荡"
+
+
+# 形态 -> 推荐策略组合（入场OR / 出场AND）。趋势形态偏趋势跟踪，震荡偏均值回归式快进快出。
+_PATTERN_STRATEGY = {
+    "bull": {  # 长牛：趋势突破入场，移动止盈/跌破均线出场
+        "entries": [{"type": "donchian_breakout", "period": 20},
+                    {"type": "ma_bull_stack", "periods": [5, 10, 20, 60]}],
+        "exits": [{"type": "trailing_pct", "pct": 10}, {"type": "ma_break", "period": 20}],
+    },
+    "bear": {  # 长熊：金叉确认才进，快速止损止盈出
+        "entries": [{"type": "ma_golden", "fast": 50, "slow": 200},
+                    {"type": "macd_golden", "fast": 12, "slow": 26, "signal": 9}],
+        "exits": [{"type": "ma_break", "period": 20}, {"type": "chandelier_atr", "atr_period": 22, "mult": 3}],
+    },
+    "cycle": {  # 牛转熊：突破入场，吊灯ATR+跌破均线及时离场
+        "entries": [{"type": "donchian_breakout", "period": 20},
+                    {"type": "macd_golden", "fast": 12, "slow": 26, "signal": 9}],
+        "exits": [{"type": "chandelier_atr", "atr_period": 22, "mult": 3}, {"type": "ma_break", "period": 20}],
+    },
+    "bearbull": {  # 熊转牛：金叉/多头排列入场，移动止盈让利润奔跑
+        "entries": [{"type": "ma_golden", "fast": 50, "slow": 200},
+                    {"type": "ma_bull_stack", "periods": [5, 10, 20, 60]}],
+        "exits": [{"type": "trailing_pct", "pct": 10}, {"type": "ma_death_cross", "fast": 50, "slow": 200}],
+    },
+    "range": {  # 震荡：突破入场，唐奇安下轨/移动止盈快进快出
+        "entries": [{"type": "donchian_breakout", "period": 20},
+                    {"type": "ma_golden", "fast": 50, "slow": 200}],
+        "exits": [{"type": "donchian_exit", "period": 10}, {"type": "trailing_pct", "pct": 10}],
+    },
+}
+
+
+def _pattern_strategy_config(pattern_key):
+    spec = _PATTERN_STRATEGY.get(pattern_key, _PATTERN_STRATEGY["range"])
+    return StrategyConfig.from_dict({
+        "entry_logic": "or", "exit_logic": "and",
+        "entry_window": 5, "exit_window": 5, "stop_loss_pct": 10.0,
+        "entries": spec["entries"], "exits": spec["exits"],
+        "position": {"entry": "fixed", "reduce": "none", "max_leverage": 1.0, "min_leverage": 1.0},
+    })
+
+
+def _optimized_top1_config(top1):
+    """把一键寻优 Top1 的 type 列表还原成带默认参数的 StrategyConfig。"""
+    edefs = {d["type"]: d for d in ENTRY_DEFAULTS}
+    xdefs = {d["type"]: d for d in EXIT_DEFAULTS}
+    entries = [dict(edefs[t]) for t in (top1.get("entry_types") or []) if t in edefs]
+    exits = [dict(xdefs[t]) for t in (top1.get("exit_types") or []) if t in xdefs]
+    return StrategyConfig.from_dict({
+        "entry_logic": top1.get("entry_logic", "or"),
+        "exit_logic": top1.get("exit_logic", "and"),
+        "entry_window": 5, "exit_window": 5, "stop_loss_pct": 10.0,
+        "entries": entries, "exits": exits,
+        "position": {"entry": "fixed", "reduce": "none", "max_leverage": 1.0, "min_leverage": 1.0},
+    })
+
+
+def _bt_summary(df, cfg, strategy_label, start, end):
+    """跑一组回测并提炼用于卡片/通知的摘要。失败返回 ok=False。"""
+    try:
+        ret = run_backtest(df, cfg, initial_capital=100000, commission=0.0005,
+                           pe_series=None, margin_rate=0.0699)
+        st = ret.get("stats") or {}
+        total_ret = st.get("total_return")
+        buy_hold = st.get("buy_hold_return")
+        excess = round(float(total_ret) - float(buy_hold), 2) \
+            if total_ret is not None and buy_hold is not None else None
+        return {
+            "ok": True, "strategy": strategy_label, "start": start, "end": end,
+            "total_return": total_ret, "buy_hold_return": buy_hold, "excess_return": excess,
+            "annualized": st.get("annualized"), "max_drawdown": st.get("max_drawdown"),
+            "num_trades": st.get("num_trades"), "win_rate": st.get("win_rate"),
+            "short_trade_rate": st.get("short_trade_rate"),
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "strategy": strategy_label}
+
+
+def _bt_quality(b):
+    """回测质量打分：年化(小数)/回撤平方惩罚，用于在两组里选更优者。失败给极小值。"""
+    if not b or not b.get("ok"):
+        return -1e9
+    try:
+        ann = float(b.get("annualized") or 0) / 100.0
+        mdd = abs(float(b.get("max_drawdown") or 0)) / 100.0
+    except (TypeError, ValueError):
+        return -1e9
+    return ann * max(0.2, (1.0 - mdd) ** 2)
+
+
+def _attach_scan_top_backtests(results):
+    """扫描完成后，为推荐值 Top10 各跑两组近5年回测并选优：
+      ① 形态推荐策略：先判断近5年形态(长牛/长熊/牛熊/熊牛/震荡)，按形态映射的策略跑一组；
+      ② 一键寻优最优：对该标的近5年跑全组合寻优，取 Top1 策略跑一组。
+    两组都记录到卡片(bt_pattern / bt_optimized)，并选效果更好者标为推荐(bt_best / bt5y 兼容字段)。
+    """
+    if not results:
+        return results
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=365 * 5)).strftime("%Y-%m-%d")
+    ranked = sorted(results, key=lambda r: (r.get("score") or {}).get("score", -1e9), reverse=True)[:10]
+    for idx, r in enumerate(ranked, 1):
+        symbol = str(r.get("symbol", "")).strip()
+        if not symbol:
+            continue
+        try:
+            df = load_kline(symbol, start, end, adjust="qfq")
+            if df is None or df.empty:
+                r["bt5y"] = {"rank": idx, "ok": False, "error": "无K线数据"}
+                continue
+
+            # ① 形态判断 + 形态推荐策略回测
+            pat_key, pat_label = _detect_pattern(df)
+            pat_cfg = _pattern_strategy_config(pat_key)
+            pat_strat_label = (
+                "/".join(CN_LABEL.get(e["type"], e["type"]) for e in pat_cfg.entries)
+                + " → "
+                + "&".join(CN_LABEL.get(e["type"], e["type"]) for e in pat_cfg.exits))
+            bt_pattern = _bt_summary(df, pat_cfg, pat_strat_label, start, end)
+            bt_pattern.update({"pattern": pat_label, "pattern_key": pat_key})
+
+            # ② 一键寻优 Top1 回测
+            bt_optimized = {"ok": False, "error": "寻优无结果", "strategy": "一键寻优"}
+            try:
+                opt = run_optimization(df, initial_capital=100000, commission=0.0005,
+                                       top_n=1, min_trades=10, return_basis="excess")
+                if opt.get("ok") and opt.get("top"):
+                    top1 = opt["top"][0]
+                    opt_cfg = _optimized_top1_config(top1)
+                    opt_label = f"{top1.get('entry', '')} → {top1.get('exit', '')}"
+                    bt_optimized = _bt_summary(df, opt_cfg, opt_label, start, end)
+            except Exception as e:
+                bt_optimized = {"ok": False, "error": f"{type(e).__name__}: {e}", "strategy": "一键寻优"}
+
+            # 选优：两组比质量分，高者为推荐
+            q_pat, q_opt = _bt_quality(bt_pattern), _bt_quality(bt_optimized)
+            if q_opt > q_pat:
+                bt_pattern["recommended"] = False
+                bt_optimized["recommended"] = True
+                best, best_source = bt_optimized, "optimized"
+            else:
+                bt_pattern["recommended"] = True
+                bt_optimized["recommended"] = False
+                best, best_source = bt_pattern, "pattern"
+
+            r["bt_pattern"] = bt_pattern
+            r["bt_optimized"] = bt_optimized
+            r["bt_best"] = {**best, "rank": idx, "source": best_source}
+            # 兼容旧字段：notify.js/通知过滤仍读 bt5y，指向推荐组
+            r["bt5y"] = {**best, "rank": idx, "symbol": symbol, "source": best_source}
+        except Exception as e:
+            r["bt5y"] = {"rank": idx, "ok": False, "error": f"{type(e).__name__}: {e}"}
+    return results
 
 
 def _save_latest(results, total, lookback_days, source="manual"):
@@ -549,7 +804,7 @@ def _format_notify_text(payload, holdings=None):
 
     结构：
       ① ⚠️ 持仓清仓提醒：持仓(holdings)中出现清仓信号的标的，重点列出；
-      ② 🏆 最推荐买入 Top10：按「推荐买入分」从高到低的前 10 只，含详情。
+      ② 🏆 推荐值 Top10：按「推荐值」从高到低的前 10 只，含详情。
     """
     results = payload.get("results", [])
     lb = payload.get("lookback_days", 10)
@@ -575,16 +830,37 @@ def _format_notify_text(payload, holdings=None):
             lines.append("- ✅ 你的持仓近期均未触发清仓信号。")
         lines.append("")
 
-    # ② 最推荐买入 Top10
-    ranked = sorted(results, key=lambda r: (r.get("score") or {}).get("score", -1), reverse=True)
-    top = ranked[:10]
-    lines.append("#### 🏆 最推荐买入 Top10")
-    if not top:
+    # ② 推荐值 Top10：推送前按5年回测质量过滤
+    ranked = sorted(results, key=lambda r: (r.get("score") or {}).get("score", -1e9), reverse=True)
+    raw_top = ranked[:10]
+
+    def _bt5y_pass(r):
+        b = r.get("bt5y") or {}
+        if not b.get("ok"):
+            return False
+        try:
+            ann = float(b.get("annualized"))
+            dd = float(b.get("max_drawdown"))
+            wr = float(b.get("win_rate"))
+        except (TypeError, ValueError):
+            return False
+        return ann >= 5.0 and dd >= -30.0 and wr >= 50.0
+
+    top = [r for r in raw_top if _bt5y_pass(r)]
+    lines.append("#### 🏆 推荐值 Top10（已过滤：5年年化≥5%、最大回撤≤30%、胜率≥50%）")
+    if not raw_top:
         lines.append("近期无标的触发信号。")
+        return "\n".join(lines)
+    if not top:
+        lines.append("推荐值Top10均未通过5年回测过滤条件，本次不推荐买入标的。")
         return "\n".join(lines)
     for idx, r in enumerate(top, 1):
         sc = r.get("score") or {}
-        sc_txt = f"{sc['score']}·{sc['level']}" if sc.get("score") is not None else "—"
+        if sc.get("score") is not None:
+            sc_txt = (f"{sc['score']}·{sc['level']}"
+                      f"（交易{sc.get('trade', 0):+} / 估值{sc.get('valuation', 0):+}）")
+        else:
+            sc_txt = "—"
         tag = []
         if r.get("entries"):
             buy_sig = "、".join(s["label"] for s in r["entries"][:3])
@@ -592,9 +868,18 @@ def _format_notify_text(payload, holdings=None):
         if r.get("exits"):
             tag.append("🔴有清仓信号")
         sug = r.get("suggest", {}).get("text", "")
+        b = r.get("bt5y") or {}
+        src = {"pattern": "形态推荐", "optimized": "一键寻优"}.get(b.get("source"), "")
+        pat = b.get("pattern")
+        if b.get("ok"):
+            head = f"5年回测·⭐推荐策略[{src}]" + (f"·形态{pat}" if pat else "")
+            bt_txt = (f"{head}：{b.get('strategy', '')} → 策略{b.get('total_return')}% / "
+                      f"年化{b.get('annualized')}% / 回撤{b.get('max_drawdown')}% / 胜率{b.get('win_rate')}%")
+        else:
+            bt_txt = "5年回测：—"
         lines.append(
             f"{idx}. 【{sc_txt}】**{r.get('name') or r.get('symbol')}**({r.get('symbol')}) "
-            f"最新价{r.get('last_close')} | {_pe_text(r.get('pe'))} | 建议仓位{sug}"
+            f"最新价{r.get('last_close')} | {_pe_text(r.get('pe'))} | 建议仓位{sug} | {bt_txt}"
             + (f"\n   {' / '.join(tag)}" if tag else ""))
     return "\n".join(lines)
 
@@ -703,45 +988,83 @@ def _run_scan_task(task_id, symbols, lookback_days, source="manual", webhook="",
         except Exception as e:
             return {"symbol": sym, "name": name, "category": cat, "error": str(e)}
 
+    def _is_cancelled():
+        with _scan_lock:
+            t = _scan_tasks.get(task_id)
+            return t is None or t.get("cancel_requested") or t.get("status") == "cancelled"
+
     done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_scan_one, item) for item in symbols]
+    ex = ThreadPoolExecutor(max_workers=workers)
+    futures = []
+    try:
+        for item in symbols:
+            if _is_cancelled():
+                break
+            futures.append(ex.submit(_scan_one, item))
         for fut in as_completed(futures):
+            if _is_cancelled():
+                ex.shutdown(wait=False, cancel_futures=True)
+                return
             r = fut.result()
             done += 1
             with _scan_lock:
                 t = _scan_tasks.get(task_id)
-                if t is None:
+                if t is None or t.get("cancel_requested") or t.get("status") == "cancelled":
+                    ex.shutdown(wait=False, cancel_futures=True)
                     return
                 t["done"] = done
                 t["current"] = r.get("name") or r.get("symbol") or ""
                 if r.get("has_signal"):
                     results.append(r)
                     t["results"] = list(results)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+    if _is_cancelled():
+        return
+    with _scan_lock:
+        t = _scan_tasks.get(task_id)
+        if t is not None and not t.get("cancel_requested") and t.get("status") != "cancelled":
+            t["done"] = total
+            t["current"] = "正在回测推荐值Top10..."
+            t["status"] = "backtesting"
+            t["results"] = list(results)
+    results = _attach_scan_top_backtests(results)
+    if _is_cancelled():
+        return
     payload = _save_latest(results, total, lookback_days, source=source)
     with _scan_lock:
         t = _scan_tasks.get(task_id)
-        if t is not None:
+        if t is not None and not t.get("cancel_requested") and t.get("status") != "cancelled":
             t["done"] = total
             t["current"] = ""
             t["status"] = "finished"
             t["finished"] = True
             t["results"] = results
-    if webhook:
+    if webhook and not _is_cancelled():
         _push_webhook(webhook, _format_notify_text(payload, holdings=holdings))
 
 
 @app.route("/api/notify/symbols")
 def api_notify_symbols():
-    """返回可选标的列表：宽基/行业(写死) + 中证A500成分股(动态)。"""
+    """返回可选标的列表：A股宽基/A500成分 + 港股指数/大市值成分 + 美股指数/标普500成分。
+    成分股较重(联网)，按需用 query 开关控制是否返回。"""
     try:
         include_a500 = request.args.get("include_a500", "1") != "0"
+        include_sp500 = request.args.get("include_sp500", "0") != "0"
+        include_hk = request.args.get("include_hk", "0") != "0"
         a500 = get_a500_constituents() if include_a500 else []
+        sp500 = get_sp500_constituents() if include_sp500 else []
+        hk_large = get_hk_large_caps() if include_hk else []
         return jsonify({
             "ok": True,
             "broad": [{"symbol": c, "name": n} for c, n in BROAD_INDICES],
             "industry": [{"symbol": c, "name": n} for c, n in INDUSTRY_INDICES],
             "a500": [{"symbol": c, "name": n} for c, n in a500],
+            "hk_index": [{"symbol": c, "name": n} for c, n in HK_INDICES],
+            "us_index": [{"symbol": c, "name": n} for c, n in US_INDICES],
+            "sp500": [{"symbol": c, "name": n} for c, n in sp500],
+            "hk": [{"symbol": c, "name": n} for c, n in hk_large],
         })
     except Exception as e:
         traceback.print_exc()
@@ -785,7 +1108,8 @@ def api_notify_scan():
         task_id = f"scan_{int(time.time() * 1000)}"
         with _scan_lock:
             _scan_tasks[task_id] = {
-                "status": "running", "finished": False,
+                "status": "running", "finished": False, "cancelled": False,
+                "cancel_requested": False,
                 "total": len(symbols), "done": 0, "current": "",
                 "results": [], "started": time.time(),
             }
@@ -811,10 +1135,34 @@ def api_notify_scan_status():
             return jsonify({"ok": False, "error": "任务不存在或已过期"})
         snap = {
             "ok": True, "status": t["status"], "finished": t["finished"],
+            "cancelled": bool(t.get("cancelled")),
             "total": t["total"], "done": t["done"], "current": t["current"],
             "results": t["results"],
         }
     return jsonify(snap)
+
+
+@app.route("/api/notify/scan_cancel", methods=["POST"])
+def api_notify_scan_cancel():
+    """取消一次正在进行的扫描任务。"""
+    try:
+        body = request.get_json(force=True) or {}
+        task_id = str(body.get("task_id", "")).strip()
+        if not task_id:
+            return jsonify({"ok": False, "error": "缺少 task_id"})
+        with _scan_lock:
+            t = _scan_tasks.get(task_id)
+            if t is None:
+                return jsonify({"ok": False, "error": "任务不存在或已过期"})
+            t["cancel_requested"] = True
+            t["cancelled"] = True
+            t["finished"] = True
+            t["status"] = "cancelled"
+            t["current"] = ""
+        return jsonify({"ok": True, "task_id": task_id, "cancelled": True})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
 
 def _apply_sub_fields(sub, body):
@@ -937,7 +1285,7 @@ def api_notify_test_webhook():
                + _format_notify_text(latest, holdings=holdings)
     else:
         text = "### ✅ trade-notify 测试消息\n你的接收地址配置成功。" \
-               "完成一次「立即扫描」后，每日盘后会推送：⚠️持仓清仓提醒 + 🏆最推荐买入Top10。"
+               "完成一次「立即扫描」后，每日盘后会推送：⚠️持仓清仓提醒 + 🏆推荐值Top10。"
 
     results = _dispatch_notify({"webhook": url, "email": mail}, text)
     ok_all = all(ok for _, ok, _ in results) and bool(results)
@@ -1032,6 +1380,7 @@ def _warmup():
         # 1. 默认回测参数（与前端默认一致）
         default_cfg = StrategyConfig.from_dict({
             "entry_logic": "or", "exit_logic": "and",
+            "stop_loss_pct": 10.0,
             "entries": [{"type": "ma_golden", "fast": 50, "slow": 200},
                         {"type": "donchian_breakout", "period": 20}],
             "exits": [{"type": "ma_break", "period": 20},
@@ -1064,14 +1413,17 @@ def _warmup():
                 if r.get("ok"):
                     _cache_put(ok_ck, r)
                     print("[warmup] 默认寻优已缓存")
-        # 3. 四段市场环境最佳策略：牛市 / 熊市 / 一轮牛熊 / 熊牛
-        for s, e in [("2019-01-01", "2021-02-18"), ("2021-02-18", "2024-02-01"), ("2019-01-01", "2024-02-01"), ("2021-02-18", "2026-06-22")]:
-            rk = _opt_cache_key("sh000300", s, e, "qfq", 0.0005, 1, 5)
+        # 3. 五段市场环境最佳策略：牛市 / 熊市 / 一轮牛熊 / 熊牛 / 近十年（基准=创业板指 sz399006）
+        decade_start = (datetime.now() - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
+        for s, e in [("2019-01-01", "2021-02-18"), ("2021-02-18", "2024-02-01"),
+                     ("2019-01-01", "2024-02-01"), ("2021-02-18", "2026-06-22"),
+                     (decade_start, today)]:
+            rk = _opt_cache_key("sz399006", s, e, "qfq", 0.0005, 1, 5)
             if _cache_get(rk) is None:
-                df = load_kline("sh000300", s, e, adjust="qfq")
+                df = load_kline("sz399006", s, e, adjust="qfq")
                 if df is not None and not df.empty:
                     r = run_optimization(df, initial_capital=100000, commission=0.0005, top_n=1, min_trades=5)
-                    r["meta"] = {"symbol": "sh000300", "start": s, "end": e, "rows": len(df)}
+                    r["meta"] = {"symbol": "sz399006", "start": s, "end": e, "rows": len(df)}
                     if r.get("ok"):
                         _cache_put(rk, r)
                         print(f"[warmup] 市场环境 {s}~{e} 已缓存")

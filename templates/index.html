@@ -18,9 +18,14 @@
       <h2>回测设置</h2>
 
       <label>股票/指数代码 <span class="q-tip" data-target="hintSymbol">?</span>
-        <input id="symbol" type="text" value="sh000300" placeholder="如 sh000300 / 600519" />
+        <input id="symbol" type="text" value="sh000300" placeholder="A股 sh000300/600519 · 港股 hkHSI/hk00700 · 美股 us.SPX/us105.AAPL" />
       </label>
-      <div class="hint" id="hintSymbol" hidden>指数加 sh/sz 前缀：sh000300 沪深300 / sh000001 上证指数 / sz399001 深证成指 / sz399006 创业板指。个股直接6位：600519 茅台<br>PE仓位支持：沪深300/上证50/上证180/上证380/中证500/中证1000/创业板50；创业板指(399006)用创业板50的PE代理；上证指数/深证成指无PE源(退化满仓)</div>
+      <div class="hint" id="hintSymbol" hidden>
+        <b>A股</b>：指数加 sh/sz 前缀，如 sh000300 沪深300 / sh000001 上证指数 / sz399001 深证成指 / sz399006 创业板指；个股直接 6 位，如 600519 茅台。<br>
+        <b>港股</b>：指数 hkHSI 恒生 / hkHSTECH 恒生科技 / hkHSCEI 恒生国企；个股 hk+5位，如 hk00700 腾讯。<br>
+        <b>美股</b>：指数 us.SPX 标普500 / us.NDX 纳指100；个股 us+东财代码，如 us105.AAPL 苹果 / us105.TSLA 特斯拉。<br>
+        港股/美股行情走 yfinance（雅虎财经），首次拉取联网、之后读本地缓存。<br>
+        <b>PE仓位</b>支持按近5年分位定仓：①A股指数(沪深300/上证50/180/380/中证500/1000/创业板50，创业板指用创业板50代理)；②A股个股(百度近十年TTM)；③港股指数/个股与美股个股(富途OpenAPI估值接口，需配置FUTU_OPEND_HOST并启动OpenD；未配置则读缓存/退化)；④美股指数 us.SPX/us.NDX 走 WorldPERatio 月度长历史 PE。其它美股指数暂无历史PE源，自动退化为满仓。</div>
 
       <div class="row">
         <label>开始日期<input id="start" type="date" /></label>
@@ -38,23 +43,30 @@
         <label>初始资金<input id="capital" type="number" value="100000" step="10000" /></label>
       </div>
 
-      <label>手续费率 <span class="q-tip" data-target="hintComm">?</span>
-        <input id="commission" type="number" value="0.0005" step="0.0001" />
-      </label>
+      <div class="row">
+        <label>手续费率 <span class="q-tip" data-target="hintComm">?</span>
+          <input id="commission" type="number" value="0.0005" step="0.0001" />
+        </label>
+        <label>融资年化利率 <span class="q-tip" data-target="hintMargin">?</span>
+          <input id="marginRate" type="number" value="0.0699" step="0.0001" />
+        </label>
+      </div>
       <div class="hint" id="hintComm" hidden>默认 0.0005（万5）</div>
-
-      <label>融资年化利率 <span class="q-tip" data-target="hintMargin">?</span>
-        <input id="marginRate" type="number" value="0.0699" step="0.0001" />
-      </label>
       <div class="hint" id="hintMargin" hidden>默认 0.0699（东方财富标准融资利率6.99%）；仓位>1的融资部分按此利率按日计息</div>
 
       <button id="runBtn">运行回测</button>
       <button id="optBtn" class="opt-btn">⚡ 一键寻优(跑所有3249种策略组合)</button>
       <span class="q-tip" data-target="hintOpt">?</span>
-      <div class="hint" id="hintOpt" hidden>用上方选定的"日期/标的"跑全部组合，按基金式综合评分排Top10</div>
+      <div class="hint" id="hintOpt" hidden>用上方选定的"日期/标的"跑全部组合，先按准入门槛(夏普≥0.5·卡玛≥0.3·回撤≤35%·交易≥10)过滤，再按综合评分排Top10；评分含卡玛、夏普、收益、资金效率，叠加回撤与超短单惩罚</div>
+      <label class="opt-return-basis">收益评分基准
+        <select id="optReturnBasis">
+          <option value="excess" selected>超额年化(相对买入持有)</option>
+          <option value="annual">年化收益率</option>
+        </select>
+      </label>
       <button id="regimeBtn" class="regime-btn-panel">🎯 跑 牛市/熊市/牛熊/熊牛 最佳策略</button>
       <span class="q-tip" data-target="hintRegime">?</span>
-      <div class="hint" id="hintRegime" hidden>分别在四段区间(均以沪深300寻优)取综合评分Top1：牛市 2019-01~2021-02 · 熊市 2021-02~2024-02 · 牛转熊 2019-01~2024-02 · 熊转牛 2021-02~2026-06。结果显示在右侧，点卡片「直接载入」即可套用。</div>
+      <div class="hint" id="hintRegime" hidden>分别在五段区间(均以创业板指 sz399006 寻优)取综合评分Top1：牛市 2019-01~2021-02 · 熊市 2021-02~2024-02 · 牛转熊 2019-01~2024-02 · 熊转牛 2021-02~2026-06 · 十年(近10年)。结果显示在右侧，点卡片「直接载入」即可套用。</div>
       <div id="status" class="status"></div>
 
       <h2>仓位管理</h2>
@@ -79,9 +91,10 @@
           <option value="profit">盈利减仓</option>
         </select>
       </label>
-      <div class="hint" id="hintReducePos" hidden>PE百分位减仓：持仓中「近5年PE百分位」每上升一个步长，就按PE曲线降到对应仓位（如步长10、最低0.5最高2，分位涨到10%时仓位200%→185%）。盈利减仓：相对买入点每上涨一个步长，仓位下调"减仓比例"个百分点（如步长50%、减仓比例10%，涨50%时200%→190%）</div>
+      <div class="hint" id="hintReducePos" hidden>PE百分位减仓：PE分位达到起步点后，再按步长触发减仓，并按PE曲线降到对应仓位（如起步点50、步长10，分位到50/60/70附近逐级减）。盈利减仓：相对买入点涨幅达到起步点后，每上涨一个步长，仓位下调"减仓比例"个百分点（如起步点50%、步长10%、减仓比例10%，涨50%开始减仓）。</div>
 
       <div class="row" id="rowReduceStep">
+        <label id="lblReduceStart">PE起步点(百分位)<input id="posReduceStart" type="number" value="50" step="1" min="0" /></label>
         <label id="lblReduceStep">PE上升步长(百分位点)<input id="posReduceStep" type="number" value="10" step="1" min="0" /></label>
         <label id="lblReducePct" style="display:none">减仓比例(百分点)<input id="posReducePct" type="number" value="10" step="1" min="0" /></label>
       </div>
@@ -121,6 +134,12 @@
         <label><input type="radio" name="exitLogic" value="or"> 任一(OR)</label>
         <label><input type="radio" name="exitLogic" value="and" checked> 同时(AND)</label>
       </span></h2>
+      <div class="row">
+        <label>入场价止损(%) <span class="q-tip" data-target="hintStopLoss">?</span>
+          <input id="stopLossPct" type="number" value="10" step="1" min="0" />
+        </label>
+      </div>
+      <div class="hint" id="hintStopLoss" hidden>全局风控：持仓期间只要收盘价相对买入价跌幅达到该比例，无论其它出场条件是否满足，都立即清仓。填0表示关闭。</div>
       <div id="exitWindowWrap" class="window-field">
         <span>容忍窗口</span>
         <input id="exitWindow" type="number" value="5" step="1" min="1">
@@ -170,6 +189,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260629-default-classic-v1"></script>
 </body>
 </html>

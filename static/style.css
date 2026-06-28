@@ -112,6 +112,7 @@ button#runBtn:disabled { background: #30363d; cursor: not-allowed; }
 .regime-card.regime-bear { border-left-color: #3fb950; }
 .regime-card.regime-cycle { border-left-color: #a371f7; }
 .regime-card.regime-bearbull { border-left-color: #d29922; }
+.regime-card.regime-decade { border-left-color: #58a6ff; }
 .rg-name { font-size: 13px; font-weight: 600; color: #e6e6e6; }
 .rg-name .rg-range { font-size: 11px; color: #6e7681; font-weight: 400; margin-left: 4px; }
 .rg-combo { font-size: 12px; color: #c9d1d9; margin: 6px 0; }

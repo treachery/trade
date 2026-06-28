@@ -1,4 +1,8 @@
 flask>=3.0
 pandas>=2.0
 akshare>=1.14
+yfinance>=1.0
+futu-api>=10.0
+requests>=2.31
+lxml>=5.0
 gunicorn>=21.0

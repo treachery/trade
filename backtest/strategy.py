@@ -52,8 +52,8 @@ CN_LABEL = {
 ENTRY_POSITION_TYPES = ("pe_percentile", "fixed")
 # 减仓策略(reduce)：
 #   none           不减仓
-#   pe_percentile  持仓中PE近5年百分位每上升 reduce_step 个点，按PE曲线降到对应仓位
-#   profit         相对买入点每上涨 reduce_step%，仓位下调 reduce_pct 个百分点
+#   pe_percentile  PE分位达到 reduce_start 后，每上升 reduce_step 个点，按PE曲线降到对应仓位
+#   profit         相对买入点涨幅达到 reduce_start 后，每上涨 reduce_step%，仓位下调 reduce_pct 个百分点
 REDUCE_POSITION_TYPES = ("none", "pe_percentile", "profit")
 
 
@@ -63,6 +63,7 @@ def _default_position():
         "reduce": "pe_percentile",     # 减仓策略
         "max_leverage": 2.0,           # 最高仓位(也是 fixed 建仓的满仓值、PE曲线上沿)
         "min_leverage": 0.5,           # 最低仓位(PE曲线下沿)
+        "reduce_start": 50.0,          # pe_percentile:PE分位起步点 / profit:涨幅%起步点
         "reduce_step": 10.0,           # pe_percentile:百分位点步长 / profit:涨幅%步长
         "reduce_pct": 10.0,            # profit 专用：每步下调的仓位百分点
     }
@@ -76,6 +77,8 @@ class StrategyConfig:
     exit_logic: str = "or"
     entry_window: int = 5     # 入场AND容忍窗口(交易日)：各策略在窗口内先后满足即触发；1=同天满足
     exit_window: int = 5      # 出场AND容忍窗口(交易日)：各策略在窗口内先后满足即触发；1=同天满足
+    # 全局风控：相对入场价的固定止损百分比，0 表示关闭。
+    stop_loss_pct: float = 10.0
     # 仓位管理：建仓(entry) + 减仓(reduce) 两段解耦
     position: dict = field(default_factory=_default_position)
 
@@ -88,6 +91,7 @@ class StrategyConfig:
         xl = "and" if str(d.get("exit_logic", "or")).lower() == "and" else "or"
         entry_window = max(1, int(d.get("entry_window", 5)))
         exit_window = max(1, int(d.get("exit_window", 5)))
+        stop_loss_pct = max(0.0, float(d.get("stop_loss_pct", 10.0) or 0))
 
         pos = d.get("position") or {}
         max_lev = float(pos.get("max_leverage", 2.0))
@@ -110,16 +114,19 @@ class StrategyConfig:
         if reduce not in REDUCE_POSITION_TYPES:
             reduce = "none"
 
+        reduce_start = float(pos.get("reduce_start", 50.0) or 0)
         reduce_step = float(pos.get("reduce_step", pos.get("deleverage_step", 10.0)) or 0)
         reduce_pct = float(pos.get("reduce_pct", 10.0) or 0)
 
         position = {
             "entry": entry, "reduce": reduce,
             "max_leverage": max_lev, "min_leverage": min_lev,
+            "reduce_start": reduce_start,
             "reduce_step": reduce_step, "reduce_pct": reduce_pct,
         }
         return cls(entries=entries, exits=exits, entry_logic=el, exit_logic=xl,
-                   entry_window=entry_window, exit_window=exit_window, position=position)
+                   entry_window=entry_window, exit_window=exit_window,
+                   stop_loss_pct=stop_loss_pct, position=position)
 
     def to_dict(self):
         return {
@@ -129,5 +136,6 @@ class StrategyConfig:
             "exit_logic": self.exit_logic,
             "entry_window": self.entry_window,
             "exit_window": self.exit_window,
+            "stop_loss_pct": self.stop_loss_pct,
             "position": self.position,
         }
