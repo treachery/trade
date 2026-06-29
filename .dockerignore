@@ -6,3 +6,7 @@ scripts/
 *.md
 .venv/
 venv/
+data_cache/
+results_all.csv
+.env
+*.token

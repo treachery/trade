@@ -134,48 +134,57 @@ trade/
 
 ## 部署（Docker + Nginx / 腾讯云轻量服务器）
 
-### 1. 构建 Docker 镜像
+> 在线实例：http://49.233.175.122（腾讯云轻量服务器 · 北京 · Ubuntu）
+
+### 架构
+
+```
+公网:80 (Nginx)  ──proxy──>  127.0.0.1:5000 (Docker/gunicorn)
+                                    │
+                          /root/trade_data_cache (volume)
+```
+
+- Nginx 监听 80 端口，gzip 压缩 + 反代到 gunicorn(5000)。
+- Docker 容器仅监听 `127.0.0.1:5000`，不对外暴露。
+- `data_cache/` 通过 volume 挂载到宿主机 `/root/trade_data_cache`，重启不丢行情/PE 缓存。
+- 环境变量通过 `--env-file /root/trade.env` 注入（GITHUB_TOKEN / SMTP 等）。
+
+### 首次部署
+
+#### 1. 准备环境变量文件
+
+在服务器 `/root/trade.env` 写入（**勿提交到 git**）：
+
+```bash
+GITHUB_TOKEN=github_pat_xxx
+GITHUB_REPO=treachery/trade
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=465
+SMTP_SSL=1
+SMTP_USER=you@gmail.com
+SMTP_PASS=应用专用密码
+SMTP_FROM=you@gmail.com
+```
+
+#### 2. 构建 Docker 镜像
 
 ```bash
 docker build -t trade:latest .
 ```
 
-### 2. 运行容器（仅监听本机 5000，由 Nginx 反代）
+> `.dockerignore` 已排除 `data_cache/`、`.git/`、`__pycache__/` 等，构建上下文仅含源码（约 1MB）。
+
+#### 3. 运行容器
 
 ```bash
 docker run -d --name trade --restart unless-stopped \
   -p 127.0.0.1:5000:5000 \
   -v /root/trade_data_cache:/app/data_cache \
-  -e GITHUB_TOKEN='你的fine-grained PAT（Issues读写权限）' \
-  -e GITHUB_REPO='treachery/trade' \
-  -e SMTP_HOST='smtp.gmail.com' -e SMTP_PORT='465' -e SMTP_SSL='1' \
-  -e SMTP_USER='发件邮箱' -e SMTP_PASS='应用专用密码/授权码' -e SMTP_FROM='发件邮箱' \
+  --env-file /root/trade.env \
   trade:latest
 ```
 
-- 生产用 `gunicorn` 运行（见 Dockerfile），通过环境变量 `HOST/PORT/DEBUG` 控制。
-- 缓存目录挂载到宿主机，重启不丢已拉取的行情/PE 数据。
-- **切勿将 token / 密码写入代码或提交到 git**（`.gitignore` 已排除 `.env`/`*.token`）。
-
-### 环境变量一览
-
-| 变量 | 用途 | 是否必填 | 示例/默认 |
-|---|---|---|---|
-| `HOST` / `PORT` / `DEBUG` | 服务监听与调试 | 否 | `0.0.0.0` / `5000` / `0` |
-| `GITHUB_TOKEN` | 反馈功能自动建 Issue（fine-grained PAT，仅授权目标仓库 Issues 读写） | 否（用反馈才需要） | `github_pat_xxx` |
-| `GITHUB_REPO` | 反馈 Issue 写入的仓库 | 否 | `owner/repo` |
-| `SCAN_WORKERS` | trade-notify 扫描并发线程数（IO密集） | 否 | 默认 `10`，上限 24 |
-| `SMTP_HOST` | **邮件推送**发件 SMTP 服务器（不设则邮件功能关闭，仅 webhook 可用） | 用邮件才需要 | `smtp.gmail.com` / `smtp.qq.com` |
-| `SMTP_PORT` | SMTP 端口 | 否 | 默认 `465` |
-| `SMTP_SSL` | `1`=SSL(465) / `0`=STARTTLS(587) | 否 | 默认 `1` |
-| `SMTP_USER` | 发件邮箱登录账号 | 用邮件才需要 | `you@gmail.com` |
-| `SMTP_PASS` | 发件邮箱密码（Gmail/QQ 须用「应用专用密码/授权码」，非登录密码） | 用邮件才需要 | — |
-| `SMTP_FROM` | 发件人地址 | 否 | 默认同 `SMTP_USER` |
-
-> 本地开发可把上述变量放进项目根目录的 `.env`（已被 git 忽略），启动前 `set -a; source .env; set +a` 加载，再 `python app.py`。
-> 邮件「收件地址」不是环境变量——在订阅页「推送邮箱」里填写。
-
-### 3. Nginx 反向代理（80 端口 + gzip + 真实 IP）
+#### 4. Nginx 反向代理
 
 ```nginx
 server {
@@ -198,8 +207,68 @@ server {
 }
 ```
 
-- 国内服务器拉取镜像建议配置 Docker 镜像加速器（如 `mirror.ccs.tencentyun.com`）。
 - 防火墙仅开放 80（HTTP）和 22（SSH），5000 端口不对外暴露。
+- 国内服务器拉取镜像建议配置 Docker 镜像加速器（如 `mirror.ccs.tencentyun.com`）。
+
+### 更新部署（CodeBuddy Lighthouse 集成）
+
+代码提交后，通过 CodeBuddy 的 Lighthouse 集成一键更新云上服务，**不在服务器上拉代码，而是上传源码到服务器打镜像**：
+
+#### 步骤
+
+1. **上传项目文件**：调用 `deploy_project_preparation`，将本地项目目录上传到服务器 `/root/trade_<时间戳>/`。
+   - `.dockerignore` 已排除 `data_cache/`（119MB），上传仅含源码（约 1MB），几秒完成。
+   - 旧的上传目录会累积，定期清理：`rm -rf /root/trade_2026*`。
+
+2. **构建新镜像**：在服务器上执行
+   ```bash
+   docker build -t trade:latest /root/trade_<时间戳>/
+   ```
+
+3. **重启容器**：
+   ```bash
+   docker stop trade && docker rm trade
+   docker run -d --name trade --restart unless-stopped \
+     -p 127.0.0.1:5000:5000 \
+     -v /root/trade_data_cache:/app/data_cache \
+     --env-file /root/trade.env \
+     trade:latest
+   ```
+
+4. **验证**：
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/   # 期望 200
+   docker logs trade --tail 20                                       # 查启动日志
+   ```
+
+5. **清理旧镜像**（可选）：
+   ```bash
+   docker image prune -f    # 清理 dangling 镜像
+   ```
+
+#### 注意事项
+
+- `data_cache/` 通过 volume 挂载，重建镜像不会丢失缓存数据。
+- `trade.env` 在宿主机 `/root/trade.env`，不随镜像更新变化。
+- 如需回滚：`docker tag trade:backup_YYYYMMDD trade:latest && docker stop trade && docker rm trade && docker run ...`（部署前可 `docker tag trade:latest trade:backup_$(date +%Y%m%d)` 备份）。
+
+### 环境变量一览
+
+| 变量 | 用途 | 是否必填 | 示例/默认 |
+|---|---|---|---|
+| `HOST` / `PORT` / `DEBUG` | 服务监听与调试 | 否 | `0.0.0.0` / `5000` / `0` |
+| `GITHUB_TOKEN` | 反馈功能自动建 Issue（fine-grained PAT，仅授权目标仓库 Issues 读写） | 否（用反馈才需要） | `github_pat_xxx` |
+| `GITHUB_REPO` | 反馈 Issue 写入的仓库 | 否 | `owner/repo` |
+| `SCAN_WORKERS` | trade-notify 扫描并发线程数（IO密集） | 否 | 默认 `10`，上限 24 |
+| `SMTP_HOST` | **邮件推送**发件 SMTP 服务器（不设则邮件功能关闭，仅 webhook 可用） | 用邮件才需要 | `smtp.gmail.com` / `smtp.qq.com` |
+| `SMTP_PORT` | SMTP 端口 | 否 | 默认 `465` |
+| `SMTP_SSL` | `1`=SSL(465) / `0`=STARTTLS(587) | 否 | 默认 `1` |
+| `SMTP_USER` | 发件邮箱登录账号 | 用邮件才需要 | `you@gmail.com` |
+| `SMTP_PASS` | 发件邮箱密码（Gmail/QQ 须用「应用专用密码/授权码」，非登录密码） | 用邮件才需要 | — |
+| `SMTP_FROM` | 发件人地址 | 否 | 默认同 `SMTP_USER` |
+
+> 本地开发可把上述变量放进项目根目录的 `.env`（已被 git 忽略），启动前 `set -a; source .env; set +a` 加载，再 `python app.py`。
+> 邮件「收件地址」不是环境变量——在订阅页「推送邮箱」里填写。
 
 > ⚠️ 默认无登录鉴权，公网部署请用防火墙限制来源 IP 或自行加访问口令。
 
