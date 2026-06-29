@@ -24,12 +24,12 @@ from .engine import (_entry_state, _static_exit_state, _atr,
                      _trailing_pe_percentiles, _entry_label, _exit_label)
 
 
-# ===== 扫描结果缓存（按交易日失效）=====
-# 同一标的、同一最新交易日(last_date)、同一参数(lookback/adjust/high_window)，
-# 扫描结果只计算一次；出现新 K 线(last_date 变化)才重算。落地 json，重启不丢。
+# ===== 扫描结果缓存（按15:00分界失效）=====
+# 同一标的、同一参数(lookback/adjust/high_window)，扫描结果在每个15:00分界区间内只算一次。
+# 盘前(00:00~14:59)和盘后(15:00~23:59)各为一个区间，跨15:00自动失效（收盘数据更新）。落地 json，重启不丢。
 _SCAN_CACHE_PATH = os.path.join(CACHE_DIR, "scan_results.json")
 # 扫描推荐值/打分逻辑变更时提升版本，避免复用旧扫描结果。
-SCAN_SCORE_VERSION = "2026-06-28-pattern-opt-dual-bt-v1"
+SCAN_SCORE_VERSION = "2026-06-29-strat-link-v1"
 _scan_cache_lock = threading.Lock()
 _scan_cache = None   # 内存镜像：{key: {"last_date":..., "result":...}}
 
@@ -53,13 +53,22 @@ def _load_scan_cache():
     return _scan_cache
 
 
+def _cache_slot(ts):
+    """把时间戳归到15:00分界区间：当天<15:00归昨天，≥15:00归今天。
+    盘前/盘后各算一个独立区间，15:00后收盘数据更新会自动失效盘前缓存。"""
+    dt = datetime.fromtimestamp(ts)
+    if dt.hour < 15:
+        dt = dt - timedelta(days=1)
+    return dt.strftime("%Y-%m-%d")
+
+
 def _scan_cache_get_fresh(key, today_str):
-    """同一自然日内已扫过(cache_day==今天) -> 直接返回缓存结果，
-    连 load_kline 都不调用(0 网络 0 计算)。跨天/新交易日则不命中，走完整流程。"""
+    """缓存命中：当前时间与缓存时间在同一个15:00分界区间内。
+    盘前(00:00~14:59)为一个区间，盘后(15:00~23:59)为另一个，跨15:00自动失效重算。"""
     cache = _load_scan_cache()
     with _scan_cache_lock:
         item = cache.get(key)
-    if item and item.get("cache_day") == today_str:
+    if item and _cache_slot(time.time()) == _cache_slot(item.get("ts", 0)):
         return item.get("result")
     return None
 
@@ -107,6 +116,10 @@ US_INDICES = [
 ]
 # 港股个股池：流通市值阈值(港币)。1000 亿 = 1e11。
 HK_MIN_MKTCAP = 1e11
+# A500 成分股：流通市值阈值(人民币)。500 亿 = 5e10。
+A500_MIN_MKTCAP = 5e10
+# 标普500 成分股：流通市值阈值(美元)。500 亿 = 5e10。
+SP500_MIN_MKTCAP = 5e10
 
 
 def get_sp500_constituents(use_cache=True, max_age_days=7):
@@ -166,16 +179,33 @@ def get_sp500_constituents(use_cache=True, max_age_days=7):
         spot = ak.stock_us_spot_em()
         # 东财代码形如 105.AAPL，截取 . 后的纯符号建索引
         sym2full = {}
-        for _, r in spot[["代码", "名称"]].iterrows():
+        sym2mc = {}
+        mc_col = next((c for c in spot.columns if "流通市值" in str(c)), None)
+        for _, r in spot.iterrows():
             full = str(r["代码"]).strip()
             pure = full.split(".")[-1].upper()
             sym2full.setdefault(pure, (full, str(r["名称"]).strip()))
+            if mc_col:
+                try:
+                    sym2mc[pure] = float(r.get(mc_col) or 0)
+                except (TypeError, ValueError):
+                    pass
         for sym, nm in pairs:
             hit = sym2full.get(sym.upper())
-            if hit:
+            if hit and (not mc_col or sym2mc.get(sym.upper(), 0) >= SP500_MIN_MKTCAP):
                 out.append([f"us{hit[0]}", nm or hit[1]])
+        # 容错：市值过滤后过少(可能是单位/接口问题)，回退到不过滤
+        if mc_col and len(out) < 50 and len(pairs) > 50:
+            print(f"[scanner] 标普500市值过滤后仅 {len(out)} 只，回退到不过滤")
+            out = [[f"us{sym2full[s.upper()][0]}", nm or sym2full[s.upper()][1]]
+                   for s, nm in pairs if s.upper() in sym2full]
     except Exception as e:
         print(f"[scanner] 标普500代码映射失败：{e}")
+
+    # 降级：spot 映射失败时用纯字母代码(us.AAPL)，yfinance 可直接处理
+    if not out and pairs:
+        print("[scanner] 标普500降级为纯字母代码(跳过东财映射/市值过滤)")
+        out = [[f"us.{sym}", nm] for sym, nm in pairs]
 
     if out:
         try:
@@ -280,6 +310,33 @@ def get_a500_constituents(use_cache=True, max_age_days=7):
                     seen.add(code)
                     name = str(r[name_col]).strip() if name_col else code
                     out.append([code, name])
+
+        # 流通市值过滤 + 名称补全（用 A股 spot 行情）
+        if out:
+            try:
+                spot = ak.stock_zh_a_spot_em()
+                mc_col = next((c for c in spot.columns if "流通市值" in str(c)), None)
+                nm_col = next((c for c in spot.columns if "名称" in str(c) and "指数" not in str(c)), None)
+                mc_map, nm_map = {}, {}
+                for _, r in spot.iterrows():
+                    code = str(r.get("代码", "")).strip().zfill(6)
+                    if mc_col:
+                        try: mc_map[code] = float(r.get(mc_col) or 0)
+                        except (TypeError, ValueError): pass
+                    if nm_col:
+                        nm_map[code] = str(r.get(nm_col, "")).strip()
+                # 名称补全：csindex 接口缺名称(或名称=代码)的用 spot 数据补
+                out = [[c, (n if n and n != c else nm_map.get(c, c))] for c, n in out]
+                # 流通市值过滤
+                if mc_col:
+                    filtered = [[c, n] for c, n in out if mc_map.get(c, 0) >= A500_MIN_MKTCAP]
+                    # 容错：过滤后过少(可能是单位/接口问题)，回退到不过滤
+                    if len(filtered) >= 50 or len(out) < 50:
+                        out = filtered
+                    else:
+                        print(f"[scanner] A500市值过滤后仅 {len(filtered)} 只，回退到不过滤")
+            except Exception as e:
+                print(f"[scanner] A500流通市值过滤失败：{e}")
     except Exception as e:
         print(f"[scanner] 获取中证A500成分股失败：{e}")
 
@@ -379,11 +436,12 @@ def _recommend_score(entries, exits, pe_info, lookback_days):
     buy_score = round(min(buy_raw * 12.0, 50.0), 1)
     sell_score = round(min(sell_raw * 12.0, 50.0), 1)
 
-    # 估值分数：分数越高代表估值越便宜，最终区间 [-25, 25]。
+    # 估值分数：分数越高代表估值越便宜，最终区间 [-12.5, 12.5]（整体权重减半）。
     # PE5YPercentile 占 80% 权重，PE 绝对值占 20% 权重。
     # - 分位项：0% -> +25，50% -> 0，100% -> -25。
     # - PE项：PE=20 -> 0；PE越低越高，越高越低，限制在 [-25, 25]；PE<=0 记为 -10。
     # - 两项都有：0.8 * 分位项 + 0.2 * PE项；只有 PE 时使用 PE项；无 PE 时为 0。
+    # - 估值分最终 ×0.5（交易分不变），降低估值对总推荐值的影响。
     def _clamp(v, lo=-25.0, hi=25.0):
         return max(lo, min(hi, v))
 
@@ -401,11 +459,11 @@ def _recommend_score(entries, exits, pe_info, lookback_days):
             pe_score = None
 
     if pct_score is not None and pe_score is not None:
-        val_score = round(0.8 * pct_score + 0.2 * pe_score, 1)
+        val_score = round((0.8 * pct_score + 0.2 * pe_score) * 0.5, 1)
     elif pct_score is not None:
-        val_score = round(pct_score, 1)
+        val_score = round(pct_score * 0.5, 1)
     elif pe_score is not None:
-        val_score = round(pe_score, 1)
+        val_score = round(pe_score * 0.5, 1)
     else:
         val_score = 0.0
 
@@ -505,25 +563,55 @@ def _resolve_pe_info(symbol, dates, today, n):
     return None
 
 
+# 新浪行情接口查 A股名称（轻量、稳定），用于补全持仓等只传代码不传名称的标的
+_sina_name_cache = {}
+
+def _sina_name(symbol):
+    """用新浪行情接口查单只 A股名称。失败返回 None。结果缓存。"""
+    if not symbol or not symbol.isdigit() or len(symbol) != 6:
+        return None
+    if symbol in _sina_name_cache:
+        return _sina_name_cache[symbol]
+    prefix = "sh" if symbol.startswith(("5", "6", "9")) else "sz"
+    try:
+        import requests as _req
+        r = _req.get(f"http://hq.sinajs.cn/list={prefix}{symbol}",
+                     timeout=5, headers={"Referer": "http://finance.sina.com.cn"})
+        r.encoding = "gbk"
+        val = r.text.split('"')[1] if '"' in r.text else ""
+        nm = val.split(",")[0] if val else None
+        if nm:
+            _sina_name_cache[symbol] = nm
+        return nm
+    except Exception:
+        return None
+
+
 def scan_symbol(symbol, name="", category="", lookback_days=10,
-                adjust="qfq", high_window=60):
+                adjust="qfq", high_window=60, use_cache=True):
     """扫描单个标的，返回信号/估值/建议仓位 dict。
     lookback_days: 只报告最近这么多个交易日内触发的信号。"""
     symbol = str(symbol).strip()
+    # 名称补全：名称为空或等于代码时(如持仓只传代码)，用新浪行情接口查名称
+    if not name or name == symbol:
+        _nm = _sina_name(symbol)
+        if _nm:
+            name = _nm
     today = datetime.now().strftime("%Y-%m-%d")
     # 取约 640 自然日历史，保证 MA200 等长周期指标可计算
     start = (datetime.now() - timedelta(days=640)).strftime("%Y-%m-%d")
 
     ck = _scan_cache_key(symbol, lookback_days, adjust, high_window)
 
-    # ① 当日缓存命中：同一自然日内已扫过 -> 直接返回，连 load_kline 都不调用(0网络0计算)。
-    cached = _scan_cache_get_fresh(ck, today)
-    if cached is not None:
-        out = dict(cached)
-        out["name"] = name or out.get("name", "")
-        out["category"] = category or out.get("category", "")
-        out["cached"] = True
-        return out
+    # ① 缓存命中(use_cache=True时)：同一15:00分界区间内已扫过 -> 直接返回。
+    if use_cache:
+        cached = _scan_cache_get_fresh(ck, today)
+        if cached is not None:
+            out = dict(cached)
+            out["name"] = name or out.get("name", "")
+            out["category"] = category or out.get("category", "")
+            out["cached"] = True
+            return out
 
     try:
         df = load_kline(symbol, start, today, adjust=adjust)

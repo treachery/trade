@@ -115,8 +115,14 @@
     .bt5y-grp { display:flex; flex-direction:column; gap:1px; padding:6px 8px; margin:4px 0; border:1px solid #21262d; border-radius:6px; }
     .bt5y-grp-best { border-color:#1f6feb; background:rgba(31,111,235,.08); }
     .bt5y-strat { color:#8b949e; font-size:11px; }
+    .bt5y-summary.bt5y-nopass { color:#8b949e; border:1px dashed #484f58; background:transparent; cursor:help; }
+    .bt5y-nopass-tip { color:#d29922; margin-bottom:4px; }
     .bt5y-load { margin-top:6px; display:inline-block; text-align:center; padding:5px 8px; border-radius:6px; background:#1f6feb; color:#fff; text-decoration:none; font-weight:700; }
     .bt5y-load:hover { background:#388bfd; }
+    .sc-actions { margin-top:8px; }
+    .sc-add-hold { padding:4px 12px; border-radius:6px; border:1px solid #30363d; background:#21262d; color:#c9d1d9; cursor:pointer; font-size:12px; }
+    .sc-add-hold:hover { background:#30363d; border-color:#58a6ff; }
+    .sc-add-hold.added { background:transparent; color:#8b949e; border-color:#484f58; cursor:default; }
     .score-detail { font-size:11px; color:#8b949e; }
     .sc-meta { font-size:12px; color:#8b949e; margin:6px 0; display:flex; flex-wrap:wrap; gap:2px 12px; }
     .sc-meta b { color:#c9d1d9; }
@@ -236,6 +242,6 @@
     </div>
   </div>
 
-  <script src="/static/notify.js?v=20260628-pattern-opt-v1"></script>
+  <script src="/static/notify.js?v=20260629-add-holding-v1"></script>
 </body>
 </html>

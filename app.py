@@ -47,7 +47,7 @@ def _minus_years(date_str, years):
 # 数据源/估值逻辑变更时提升版本，避免命中旧 PE 可用性结果。
 DATA_SOURCE_VERSION = "2026-06-28-or-entry-fix-v1"
 # 寻优打分逻辑变更时提升版本，避免命中旧评分结果。
-OPT_SCORE_VERSION = "2026-06-28-filter-return15-v1"
+OPT_SCORE_VERSION = "2026-06-29-no-filter-v1"
 _SERVER_CACHE = OrderedDict()
 _SERVER_CACHE_MAX = 100
 _cache_lock = threading.Lock()
@@ -569,7 +569,7 @@ def _scan_default_backtest_config():
 
 # ===== 形态判断 + 形态→策略映射（用于扫描 Top10 的"形态推荐策略"组）=====
 def _detect_pattern(df):
-    """根据近5年走势判断形态：长牛/长熊/牛熊/熊牛/震荡。
+    """根据近1年走势判断形态：长牛/长熊/牛熊/熊牛/震荡。
 
     取样：起点、终点、最高、最低，并每约3个月(63交易日)采样一个收盘点；
     依据总涨跌幅、最高/最低出现的相对位置(前半段 vs 后半段)综合判断。
@@ -686,6 +686,32 @@ def _bt_summary(df, cfg, strategy_label, start, end):
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "strategy": strategy_label}
 
 
+# 通知推荐过滤门槛：推荐组近1年回测需同时满足，否则不推送买入（页面卡片仍展示并标注原因）。
+NOTIFY_ANN_MIN = 5.0      # 年化收益 ≥ 5%
+NOTIFY_MDD_MIN = -20.0    # 最大回撤 ≥ -20%（即跌幅不超过20%）
+NOTIFY_WR_MIN = 30.0      # 胜率 ≥ 30%
+
+
+def _notify_filter(b):
+    """判断回测摘要是否通过通知推荐门槛。返回 (是否通过, 未达标原因列表)。"""
+    if not b or not b.get("ok"):
+        return False, ["无有效回测"]
+    reasons = []
+    try:
+        ann = float(b.get("annualized"))
+        dd = float(b.get("max_drawdown"))
+        wr = float(b.get("win_rate"))
+    except (TypeError, ValueError):
+        return False, ["回测数据缺失"]
+    if ann < NOTIFY_ANN_MIN:
+        reasons.append(f"年化{ann}%<{NOTIFY_ANN_MIN}%")
+    if dd < NOTIFY_MDD_MIN:
+        reasons.append(f"回撤{dd}%>{NOTIFY_MDD_MIN}%")
+    if wr < NOTIFY_WR_MIN:
+        reasons.append(f"胜率{wr}%<{NOTIFY_WR_MIN}%")
+    return (len(reasons) == 0), reasons
+
+
 def _bt_quality(b):
     """回测质量打分：年化(小数)/回撤平方惩罚，用于在两组里选更优者。失败给极小值。"""
     if not b or not b.get("ok"):
@@ -699,15 +725,15 @@ def _bt_quality(b):
 
 
 def _attach_scan_top_backtests(results):
-    """扫描完成后，为推荐值 Top10 各跑两组近5年回测并选优：
-      ① 形态推荐策略：先判断近5年形态(长牛/长熊/牛熊/熊牛/震荡)，按形态映射的策略跑一组；
-      ② 一键寻优最优：对该标的近5年跑全组合寻优，取 Top1 策略跑一组。
+    """扫描完成后，为推荐值 Top10 各跑两组近1年回测并选优：
+      ① 形态推荐策略：先判断近1年形态(长牛/长熊/牛熊/熊牛/震荡)，按形态映射的策略跑一组；
+      ② 一键寻优最优：对该标的近1年跑全组合寻优，取 Top1 策略跑一组。
     两组都记录到卡片(bt_pattern / bt_optimized)，并选效果更好者标为推荐(bt_best / bt5y 兼容字段)。
     """
     if not results:
         return results
     end = datetime.now().strftime("%Y-%m-%d")
-    start = (datetime.now() - timedelta(days=365 * 5)).strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=365 * 1)).strftime("%Y-%m-%d")
     ranked = sorted(results, key=lambda r: (r.get("score") or {}).get("score", -1e9), reverse=True)[:10]
     for idx, r in enumerate(ranked, 1):
         symbol = str(r.get("symbol", "")).strip()
@@ -727,7 +753,10 @@ def _attach_scan_top_backtests(results):
                 + " → "
                 + "&".join(CN_LABEL.get(e["type"], e["type"]) for e in pat_cfg.exits))
             bt_pattern = _bt_summary(df, pat_cfg, pat_strat_label, start, end)
-            bt_pattern.update({"pattern": pat_label, "pattern_key": pat_key})
+            bt_pattern.update({"pattern": pat_label, "pattern_key": pat_key,
+                               "entry_types": [e["type"] for e in pat_cfg.entries],
+                               "exit_types": [e["type"] for e in pat_cfg.exits],
+                               "entry_logic": "or", "exit_logic": "and"})
 
             # ② 一键寻优 Top1 回测
             bt_optimized = {"ok": False, "error": "寻优无结果", "strategy": "一键寻优"}
@@ -739,6 +768,10 @@ def _attach_scan_top_backtests(results):
                     opt_cfg = _optimized_top1_config(top1)
                     opt_label = f"{top1.get('entry', '')} → {top1.get('exit', '')}"
                     bt_optimized = _bt_summary(df, opt_cfg, opt_label, start, end)
+                    bt_optimized.update({"entry_types": top1.get("entry_types", []),
+                                         "exit_types": top1.get("exit_types", []),
+                                         "entry_logic": top1.get("entry_logic", "or"),
+                                         "exit_logic": top1.get("exit_logic", "and")})
             except Exception as e:
                 bt_optimized = {"ok": False, "error": f"{type(e).__name__}: {e}", "strategy": "一键寻优"}
 
@@ -753,11 +786,15 @@ def _attach_scan_top_backtests(results):
                 bt_optimized["recommended"] = False
                 best, best_source = bt_pattern, "pattern"
 
+            # 推荐组是否通过通知门槛 + 未达标原因（页面卡片展示用；通知推送据此过滤）
+            notify_pass, notify_reasons = _notify_filter(best)
             r["bt_pattern"] = bt_pattern
             r["bt_optimized"] = bt_optimized
-            r["bt_best"] = {**best, "rank": idx, "source": best_source}
+            r["bt_best"] = {**best, "rank": idx, "source": best_source,
+                            "notify_pass": notify_pass, "notify_fail_reasons": notify_reasons}
             # 兼容旧字段：notify.js/通知过滤仍读 bt5y，指向推荐组
-            r["bt5y"] = {**best, "rank": idx, "symbol": symbol, "source": best_source}
+            r["bt5y"] = {**best, "rank": idx, "symbol": symbol, "source": best_source,
+                         "notify_pass": notify_pass, "notify_fail_reasons": notify_reasons}
         except Exception as e:
             r["bt5y"] = {"rank": idx, "ok": False, "error": f"{type(e).__name__}: {e}"}
     return results
@@ -830,29 +867,23 @@ def _format_notify_text(payload, holdings=None):
             lines.append("- ✅ 你的持仓近期均未触发清仓信号。")
         lines.append("")
 
-    # ② 推荐值 Top10：推送前按5年回测质量过滤
+    # ② 推荐值 Top10：推送前按1年回测质量过滤
     ranked = sorted(results, key=lambda r: (r.get("score") or {}).get("score", -1e9), reverse=True)
     raw_top = ranked[:10]
 
     def _bt5y_pass(r):
         b = r.get("bt5y") or {}
-        if not b.get("ok"):
-            return False
-        try:
-            ann = float(b.get("annualized"))
-            dd = float(b.get("max_drawdown"))
-            wr = float(b.get("win_rate"))
-        except (TypeError, ValueError):
-            return False
-        return ann >= 5.0 and dd >= -30.0 and wr >= 50.0
+        if "notify_pass" in b:        # 优先用回测时算好的判定(口径一致)
+            return bool(b.get("notify_pass"))
+        return _notify_filter(b)[0]   # 兼容旧数据
 
     top = [r for r in raw_top if _bt5y_pass(r)]
-    lines.append("#### 🏆 推荐值 Top10（已过滤：5年年化≥5%、最大回撤≤30%、胜率≥50%）")
+    lines.append("#### 🏆 推荐值 Top10（已过滤：1年年化≥5%、最大回撤≤20%、胜率≥30%）")
     if not raw_top:
         lines.append("近期无标的触发信号。")
         return "\n".join(lines)
     if not top:
-        lines.append("推荐值Top10均未通过5年回测过滤条件，本次不推荐买入标的。")
+        lines.append("推荐值Top10均未通过1年回测过滤条件，本次不推荐买入标的。")
         return "\n".join(lines)
     for idx, r in enumerate(top, 1):
         sc = r.get("score") or {}
@@ -872,11 +903,11 @@ def _format_notify_text(payload, holdings=None):
         src = {"pattern": "形态推荐", "optimized": "一键寻优"}.get(b.get("source"), "")
         pat = b.get("pattern")
         if b.get("ok"):
-            head = f"5年回测·⭐推荐策略[{src}]" + (f"·形态{pat}" if pat else "")
+            head = f"1年回测·⭐推荐策略[{src}]" + (f"·形态{pat}" if pat else "")
             bt_txt = (f"{head}：{b.get('strategy', '')} → 策略{b.get('total_return')}% / "
                       f"年化{b.get('annualized')}% / 回撤{b.get('max_drawdown')}% / 胜率{b.get('win_rate')}%")
         else:
-            bt_txt = "5年回测：—"
+            bt_txt = "1年回测：—"
         lines.append(
             f"{idx}. 【{sc_txt}】**{r.get('name') or r.get('symbol')}**({r.get('symbol')}) "
             f"最新价{r.get('last_close')} | {_pe_text(r.get('pe'))} | 建议仓位{sug} | {bt_txt}"
@@ -981,10 +1012,12 @@ def _run_scan_task(task_id, symbols, lookback_days, source="manual", webhook="",
         workers = 10
     workers = min(workers, total) or 1
 
+    use_cache = (source != "manual")
+    holding_codes = {str(c).strip() for c, _ in (holdings or [])}  # 持仓代码集合(始终保留在结果里)
     def _scan_one(item):
         sym, name, cat = (item + ["", ""])[:3] if isinstance(item, list) else (item, "", "")
         try:
-            return scan_symbol(sym, name, cat, lookback_days=lookback_days)
+            return scan_symbol(sym, name, cat, lookback_days=lookback_days, use_cache=use_cache)
         except Exception as e:
             return {"symbol": sym, "name": name, "category": cat, "error": str(e)}
 
@@ -1014,7 +1047,7 @@ def _run_scan_task(task_id, symbols, lookback_days, source="manual", webhook="",
                     return
                 t["done"] = done
                 t["current"] = r.get("name") or r.get("symbol") or ""
-                if r.get("has_signal"):
+                if r.get("has_signal") or str(r.get("symbol", "")).strip() in holding_codes:
                     results.append(r)
                     t["results"] = list(results)
     finally:

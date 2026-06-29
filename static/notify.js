@@ -321,8 +321,13 @@
       const rc = ret >= 0 ? "pos" : "neg";
       const srcName = best.source === "optimized" ? "一键寻优" : "形态推荐";
       const qs = new URLSearchParams({
-        symbol: r.symbol, start: best.start, end: best.end, preset: "scan5y", autorun: "1",
+        symbol: r.symbol, start: best.start, end: best.end, autorun: "1",
       });
+      // 带上推荐策略的实际配置，主页载入后按该策略跑（与卡片回测口径一致）
+      if (Array.isArray(best.entry_types) && best.entry_types.length) qs.set("entry", best.entry_types.join(","));
+      if (Array.isArray(best.exit_types) && best.exit_types.length) qs.set("exit", best.exit_types.join(","));
+      if (best.entry_logic) qs.set("el", best.entry_logic);
+      if (best.exit_logic) qs.set("xl", best.exit_logic);
 
       // 单组回测明细渲染
       const grp = (b, title, isBest) => {
@@ -339,10 +344,16 @@
         </div>`;
       };
 
+      const passed = best.notify_pass !== false;
+      const reasons = (best.notify_fail_reasons || []).join("、");
+      const flag = passed
+        ? `<span class="bt5y-summary ${rc}">Top${best.rank} 推荐[${srcName}] ${ret >= 0 ? "+" : ""}${ret.toFixed(1)}%</span>`
+        : `<span class="bt5y-summary bt5y-nopass" title="未达推荐门槛(年化≥5%·回撤≤20%·胜率≥30%)：${reasons}">Top${best.rank} 未推荐 · ${reasons || "未达标"}</span>`;
       bt = `<span class="bt5y-wrap">
-        <span class="bt5y-summary ${rc}">Top${best.rank} 推荐[${srcName}] ${ret >= 0 ? "+" : ""}${ret.toFixed(1)}%</span>
+        ${flag}
         <span class="bt5y-pop">
-          <b>Top${best.rank}｜近5年两组策略回测对比</b>
+          <b>Top${best.rank}｜近1年两组策略回测对比</b>
+          ${passed ? "" : `<span class="bt5y-nopass-tip">⚠ 未达推荐门槛（年化≥5% · 回撤≤20% · 胜率≥30%）：${reasons}，不进推送</span>`}
           ${grp(r.bt_pattern, "形态推荐策略", r.bt_pattern && r.bt_pattern.recommended)}
           ${grp(r.bt_optimized, "一键寻优最优策略", r.bt_optimized && r.bt_optimized.recommended)}
           <a class="bt5y-load" href="/?${qs.toString()}">载入主页查看回测</a>
@@ -364,6 +375,23 @@
     }).join("");
     const label = kind === "buy" ? "入场信号" : "清仓信号";
     return `<div class="sig-block"><div class="sig-label">${label}</div><div class="chips">${items}</div></div>`;
+  }
+
+  function getHoldingCodes() {
+    return new Set(collectHoldings().map((h) => h[0]));
+  }
+
+  async function addToHolding(symbol, name, btn) {
+    const codes = getHoldingCodes();
+    if (codes.has(symbol)) {
+      subToast(`${name} 已在持仓中`, false);
+      return;
+    }
+    const cur = $("holdings").value.trim();
+    $("holdings").value = cur ? cur + "," + symbol : symbol;
+    if (btn) { btn.textContent = "✓ 已在持仓"; btn.classList.add("added"); }
+    subToast(`📌 ${name} 已加入持仓，正在保存…`, true);
+    await saveSubscription();
   }
 
   function renderResults() {
@@ -394,8 +422,11 @@
       return;
     }
     $("emptyTip").style.display = "none";
+    const holdCodes = getHoldingCodes();
     box.innerHTML = list.map((r) => {
       const cat = CAT_NAME[r.category] || "标的";
+      const inHold = holdCodes.has(r.symbol);
+      const nm = (r.name || r.symbol).replace(/"/g, "&quot;");
       return `<div class="scard ${cardClass(r)}">
         <div class="sc-head">
           <div class="sc-name">${r.name || r.symbol}<span class="sc-code">${r.symbol}</span></div>
@@ -409,8 +440,14 @@
         <div class="sc-meta"><span>建议仓位：<b>${r.suggest ? r.suggest.text : "—"}</b></span></div>
         ${chipsHtml(r.entries, "buy")}
         ${chipsHtml(r.exits, "sell")}
+        <div class="sc-actions">
+          <button class="sc-add-hold ${inHold ? "added" : ""}" data-sym="${r.symbol}" data-name="${nm}">${inHold ? "✓ 已在持仓" : "📌 加入持仓"}</button>
+        </div>
       </div>`;
     }).join("");
+    box.querySelectorAll(".sc-add-hold").forEach((btn) => {
+      btn.addEventListener("click", () => addToHolding(btn.dataset.sym, btn.dataset.name, btn));
+    });
   }
 
   // ---------- 订阅列表(多组) ----------

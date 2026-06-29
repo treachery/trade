@@ -998,22 +998,11 @@ def run_optimization(df: pd.DataFrame, initial_capital: float = 100000.0,
             best[sig] = (rank_key, r)
     rows = [v[1] for v in best.values()]
 
-    # ===== 第一步：准入过滤（淘汰明显较差的策略，与评分职责分离）=====
-    # 门槛：交易≥min_trades、夏普≥0.5、卡玛≥0.3、最大回撤≤35%。
-    # 若过滤后为空(如熊市无合格策略)，退化为仅按 trades≥min_trades 的池，保证仍有结果。
-    SHARPE_MIN, CALMAR_MIN, MDD_MAX = 0.5, 0.3, 35.0
-
-    def _eligible(r):
-        return (r["trades"] >= min_trades
-                and r["sharpe"] >= SHARPE_MIN
-                and r["calmar"] >= CALMAR_MIN
-                and abs(r["max_drawdown"]) <= MDD_MAX)
-
-    pool = [r for r in rows if _eligible(r)]
+    # ===== 第一步：全部策略进入评分（不做准入过滤）=====
+    # 评分体系(卡玛/夏普/收益/资金效率×回撤惩罚×超短单惩罚)已能区分优劣；
+    # 1笔交易也能赚钱，夏普=0(样本不足)只拉低该项得分但不直接淘汰。
+    pool = rows
     fallback_pool = False
-    if not pool:
-        fallback_pool = True
-        pool = [r for r in rows if r["trades"] >= min_trades] or rows[:]
 
     # ===== 第二步：综合评分（绝对锚定 + clamp(-1,1)，仅对合格策略排序）=====
     # 各子项归一到 [-1, 1]（年化/超额年化/回撤在数据里是百分数，计算时先 /100 还原为小数）：
@@ -1063,10 +1052,9 @@ def run_optimization(df: pd.DataFrame, initial_capital: float = 100000.0,
         "total_combos": len(entry_signals) * len(exit_structs),
         "unique_combos": len(rows),
         "scored_pool": len(pool),
-        "min_trades": min_trades,
+        "min_trades": 0,
         "return_basis": "annual" if not use_excess else "excess",
-        "filters": {"sharpe_min": SHARPE_MIN, "calmar_min": CALMAR_MIN, "mdd_max": MDD_MAX,
-                    "fallback": fallback_pool},
+        "filters": {"enabled": False, "fallback": False, "window_years": round(years, 2)},
         "benchmark": {"buy_hold_return": round(buyhold_total * 100, 2),
                       "buy_hold_annualized": round(buyhold_ann * 100, 2)},
         "weights": W,

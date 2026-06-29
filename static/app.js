@@ -136,7 +136,13 @@ function initFromUrlParams() {
   if (st) $("start").value = st;
   const ed = qs.get("end");
   if (ed) $("end").value = ed;
-  if (qs.get("preset") === "scan5y") applyScan5yPreset();
+  // 优先用卡片推荐策略参数（entry/exit/el/xl），与卡片回测口径一致；无则回退固定 preset
+  const entry = qs.get("entry"), exit = qs.get("exit");
+  if (entry && exit) {
+    applyConfig(entry.split(","), qs.get("el") || "or", exit.split(","), qs.get("xl") || "and");
+  } else if (qs.get("preset") === "scan5y") {
+    applyScan5yPreset();
+  }
 }
 
 function renderTrades(trades) {
@@ -212,7 +218,7 @@ function renderTrades(trades) {
 // ===== 请求缓存：参数未变则不重复请求后端，用本地数据重新渲染（带1s载入动效）=====
 const _cache = { backtest: null, optimize: {} };  // optimize 按 symbol+start+end 缓存
 const DATA_SOURCE_VERSION = "2026-06-28-or-entry-fix-v1";
-const OPT_SCORE_VERSION = "2026-06-28-filter-return15-v1";
+const OPT_SCORE_VERSION = "2026-06-29-no-filter-v1";
 function _payloadKey(p) { return JSON.stringify({ v: DATA_SOURCE_VERSION, ...p }); }
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -432,7 +438,7 @@ function renderOpt(res) {
   wrap.innerHTML = `
     <div class="opt-head">
       <h2>寻优 Top10 <span class="sub">综合评分 = (0.35×卡玛分 + 0.30×夏普分 + 0.20×${res.return_basis === "annual" ? "年化" : "超额年化"}分 + 0.15×资金效率分) × 回撤惩罚 × 超短单惩罚（子项 clamp[-1,1]：卡玛/2、夏普/2、收益/15%、(年化/平均持仓)/50%；回撤惩罚=max(0.2, (1-最大回撤幅度)²)；超短单惩罚=max(0.5, 1-超短≤3日占比)）</span></h2>
-      <div class="opt-meta">共 ${res.total_combos} 组合 → 去重后 ${res.unique_combos} 个 · 准入门槛(夏普≥${(res.filters || {}).sharpe_min ?? 0.5}·卡玛≥${(res.filters || {}).calmar_min ?? 0.3}·回撤≤${(res.filters || {}).mdd_max ?? 35}%·交易≥${res.min_trades}) → 合格 ${res.scored_pool} 个${(res.filters || {}).fallback ? "（无策略达标，已放宽为仅交易门槛）" : ""} · 收益基准：${res.return_basis === "annual" ? "年化收益率" : "超额年化"} · 同期买入持有 ${bh.buy_hold_return}%（年化${bh.buy_hold_annualized}%）</div>
+      <div class="opt-meta">共 ${res.total_combos} 组合 → 去重后 ${res.unique_combos} 个 · ${(res.filters && res.filters.enabled === false) ? "无准入门槛，全部策略参与评分" : `准入门槛(夏普≥${(res.filters || {}).sharpe_min ?? 0.5}·卡玛≥${(res.filters || {}).calmar_min ?? 0.3}·回撤≤${(res.filters || {}).mdd_max ?? 35}%·交易≥${res.min_trades})`} → 合格 ${res.scored_pool} 个${(res.filters || {}).fallback ? "（无策略达标，已放宽为仅交易门槛）" : ""} · 收益基准：${res.return_basis === "annual" ? "年化收益率" : "超额年化"} · 同期买入持有 ${bh.buy_hold_return}%（年化${bh.buy_hold_annualized}%）</div>
     </div>
     <table class="opt-table">
       <thead><tr>
