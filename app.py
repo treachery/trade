@@ -26,7 +26,16 @@ from backtest import (load_kline, load_pe, load_valuation_pe, run_backtest,
 from backtest.scanner import (scan_symbol, default_symbols, get_a500_constituents,
                               get_sp500_constituents, get_hk_large_caps,
                               BROAD_INDICES, INDUSTRY_INDICES, HK_INDICES, US_INDICES)
-from backtest.data import CACHE_DIR
+from backtest.data import CACHE_DIR, load_kline, load_valuation_pe
+from pattern_matching import analyze_symbol, evaluate_strategies, detect_signals
+from pattern_matching.universe import (universe_options, preview_universe,
+                                        create_universe, get_universe, list_universes)
+
+# ===== 预下载状态 =====
+_preload_status = {"running": False, "done": False, "total": 0, "ok": 0, "fail": 0,
+                   "current": "", "stage": "", "log": [], "log_count": 0, "start_time": 0,
+                   "total_bytes": 0, "speed": "0 KB/s", "total_data": "0 B", "start_bytes": 0}
+_byte_history = []
 
 app = Flask(__name__)
 
@@ -242,6 +251,16 @@ def trade_notify_page():
     return render_template("trade_notify.html")
 
 
+@app.route("/pattern-research")
+def pattern_research_page():
+    return render_template("pattern_research.html")
+
+
+@app.route("/pattern-help")
+def pattern_help_page():
+    return render_template("pattern_help.html")
+
+
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
     try:
@@ -342,6 +361,399 @@ def api_optimize():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+# ===== 相似K线策略研究 API（对应总体设计文档第4-7层）=====
+@app.route("/api/pattern/signals", methods=["POST"])
+def api_pattern_signals():
+    """信号侦测：在指定日期检测标的的买入/卖出信号事件。"""
+    try:
+        body = request.get_json(force=True) or {}
+        symbol = str(body.get("symbol", "sh000300")).strip()
+        as_of = str(body.get("as_of_date", "")).strip() or None
+        adjust = str(body.get("adjust", "qfq")).strip()
+        lookback = int(body.get("lookback_years", 5))
+        result = detect_signals(symbol, as_of_date=as_of, adjust=adjust, lookback_years=lookback)
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+@app.route("/api/pattern/analyze", methods=["POST"])
+def api_pattern_analyze():
+    """端到端分析：信号侦测 → 相似K线检索 → 策略评估排序。"""
+    try:
+        body = request.get_json(force=True) or {}
+        symbol = str(body.get("symbol", "sh000300")).strip()
+        as_of = str(body.get("as_of_date", "")).strip() or None
+        adjust = str(body.get("adjust", "qfq")).strip()
+        lookback = int(body.get("lookback_years", 6))
+        top_k = int(body.get("top_k", 10))
+        ref_symbols = body.get("reference_symbols", None)
+        print(f"[pattern] symbol={symbol} as_of={as_of or 'latest'} top_k={top_k} ref={ref_symbols}")
+
+        t0 = time.time()
+        analysis = analyze_symbol(symbol, as_of_date=as_of, adjust=adjust,
+                                  lookback_years=lookback, top_k=top_k,
+                                  reference_symbols=ref_symbols)
+        t1 = time.time()
+        if not analysis.get("ok"):
+            print(f"[pattern] 失败: {analysis.get('error')}")
+            return jsonify(analysis)
+        print(f"[pattern] 检索({t1-t0:.1f}s): {analysis['total_stocks']} stocks, {analysis.get('total_windows',0)} wins")
+
+        retrieval = analysis.get("retrieval", {})
+        final_top = retrieval.get("final_top", [])
+        final_top_eval = retrieval.get("final_top_eval", final_top)
+        # 评估两份：Top-K(展示用,精华小样本) + Top-100(大样本,有统计置信度)
+        eval_result = evaluate_strategies(final_top)
+        eval_result_full = evaluate_strategies(final_top_eval)
+        analysis["strategy_eval"] = eval_result          # 兼容旧前端：默认为 Top-K
+        analysis["strategy_eval_top"] = eval_result      # Top-K 评估(明确命名)
+        analysis["strategy_eval_full"] = eval_result_full  # Top-100 评估
+        t2 = time.time()
+        best_top = eval_result.get('best_strategy', {}).get('strategy_name', '?')
+        best_full = eval_result_full.get('best_strategy', {}).get('strategy_name', '?')
+        print(f"[pattern] 全流程({t2-t0:.1f}s): topK_best={best_top} top100_best={best_full}")
+        return jsonify(analysis)
+    except Exception as e:
+        traceback.print_exc()
+        print(f"[pattern] 异常: {type(e).__name__}: {e}")
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+@app.route("/api/pattern/retrieval/query", methods=["POST"])
+def api_retrieval_query():
+    """BE-033: 相似检索 API — 返回 query_kline + similar_windows + stage_logs"""
+    try:
+        body = request.get_json(force=True) or {}
+        symbol = str(body.get("symbol", "sh000300")).strip()
+        as_of = str(body.get("as_of_date", "")).strip() or None
+        adjust = str(body.get("adjust", "qfq")).strip()
+        lookback = int(body.get("lookback_years", 6))
+        top_k = int(body.get("top_k", 10))
+        ref_symbols = body.get("reference_symbols", None)
+        print(f"[retrieval/query] symbol={symbol} top_k={top_k}")
+
+        t0 = time.time()
+        result = analyze_symbol(symbol, as_of_date=as_of, adjust=adjust,
+                                lookback_years=lookback, top_k=top_k,
+                                reference_symbols=ref_symbols)
+        t1 = time.time()
+        result["diagnostics"] = {
+            "elapsed_ms": round((t1 - t0) * 1000, 1),
+            "reference_stocks": result.get("total_stocks", 0),
+            "total_windows": result.get("total_windows", 0),
+        }
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+
+# ===== 股票池管理 API（BE-010）=====
+@app.route("/api/universe/options")
+def api_universe_options():
+    return jsonify(universe_options())
+
+
+@app.route("/api/universe/preview", methods=["POST"])
+def api_universe_preview():
+    try:
+        body = request.get_json(force=True) or {}
+        sources = body.get("sources", ["a500"])
+        custom = body.get("custom_symbols", [])
+        return jsonify(preview_universe(sources, custom))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/universe", methods=["POST"])
+def api_universe_create():
+    try:
+        body = request.get_json(force=True) or {}
+        result = create_universe(
+            universe_type=str(body.get("type", "reference")),
+            name=str(body.get("name", "")).strip() or "unnamed",
+            sources=body.get("sources", ["a500"]),
+            custom_symbols=body.get("custom_symbols", []),
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/universe", methods=["GET"])
+def api_universe_list():
+    ut = request.args.get("type", "")
+    return jsonify(list_universes(ut or None))
+
+
+@app.route("/api/universe/<universe_id>", methods=["GET"])
+def api_universe_get(universe_id):
+    return jsonify(get_universe(universe_id))
+
+
+# ===== 预下载10年K线+PE数据 =====
+_PRELOAD_INDICES = [
+    ("sh000510", "中证A500"), ("sh000300", "沪深300"), ("sh000001", "上证指数"),
+    ("sz399001", "深证成指"), ("sz399006", "创业板指"),
+    ("hkHSI", "恒生指数"), ("hkHSTECH", "恒生科技"),
+    ("us.SPX", "标普500"), ("us.NDX", "纳指100"),
+]
+_PRELOAD_START = (datetime.now() - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
+_PRELOAD_END = datetime.now().strftime("%Y-%m-%d")
+
+
+def _preload_worker(symbols, stage_label, download_pe=True):
+    """后台预下载工作函数。多数据源多线程并行下载。"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading as _th
+    total = len(symbols)
+    _preload_status["total"] = total
+    _preload_status["ok"] = 0
+    _preload_status["fail"] = 0
+    _preload_status["stage"] = stage_label
+    _lock = _th.Lock()
+
+    # 3个K线数据源，动态调度：共享队列，哪个空闲取下一个
+    SOURCES = ["sina", "tx", "em"]
+    import queue as _q
+    task_queue = _q.Queue()
+    for sym in symbols:
+        task_queue.put(sym)
+    for s in SOURCES:
+        print(f"[preload] source={s} ready")
+
+    def _dl_one(sym_code, source):
+        t0 = time.time()
+        try:
+            # 离线检查缓存
+            df = load_kline(sym_code, _PRELOAD_START, _PRELOAD_END, adjust="qfq",
+                            use_cache=True, offline=True, source=source)
+            cache_rows = len(df) if df is not None and not df.empty else 0
+            cache_min = str(df["date"].min())[:10] if cache_rows > 0 else ""
+            cache_max = str(df["date"].max())[:10] if cache_rows > 0 else ""
+
+            # 缓存已有3年以上且数据是最新的 → 跳过
+            if cache_rows >= 250:
+                years_covered = (datetime.strptime(cache_max, "%Y-%m-%d") - datetime.strptime(cache_min, "%Y-%m-%d")).days / 365.0
+                days_old = (datetime.now() - datetime.strptime(cache_max, "%Y-%m-%d")).days
+                if years_covered >= 3.0 and days_old <= 5:
+                    if download_pe:
+                        try: load_valuation_pe(sym_code, _PRELOAD_START, _PRELOAD_END, use_cache=True)
+                        except Exception: pass
+                    dt = time.time() - t0
+                    return (sym_code, True, dt, "skip(%.1fy %s~%s)" % (years_covered, cache_min, cache_max))
+
+            # 联网下载（缓存不足/数据旧/上市短 都要下载）
+            df = load_kline(sym_code, _PRELOAD_START, _PRELOAD_END, adjust="qfq",
+                            use_cache=True, source=source)
+            new_rows = len(df) if df is not None and not df.empty else 0
+
+            if new_rows > 0 and df is not None and not df.empty:
+                data_min = str(df["date"].min())[:10]
+                data_max = str(df["date"].max())[:10]
+                years = (datetime.strptime(data_max, "%Y-%m-%d") - datetime.strptime(data_min, "%Y-%m-%d")).days / 365.0
+                days_old = (datetime.now() - datetime.strptime(data_max, "%Y-%m-%d")).days
+
+                if new_rows > cache_rows:
+                    # 下载了新数据
+                    if download_pe:
+                        try: load_valuation_pe(sym_code, _PRELOAD_START, _PRELOAD_END, use_cache=True)
+                        except Exception: pass
+                    dt = time.time() - t0
+                    return (sym_code, True, dt, "dl[%s](%d->%d %.1fy %s~%s)" % (source, cache_rows, new_rows, years, data_min, data_max))
+                elif days_old <= 5:
+                    # 行数没变但数据是最新的 → 全部历史就这么多（上市短或已全量）
+                    if download_pe:
+                        try: load_valuation_pe(sym_code, _PRELOAD_START, _PRELOAD_END, use_cache=True)
+                        except Exception: pass
+                    dt = time.time() - t0
+                    return (sym_code, True, dt, "ok[%s](%drows %.1fy %s~%s)" % (source, new_rows, years, data_min, data_max))
+                else:
+                    # 行数没变且数据不是最新 → 网络下载失败
+                    dt = time.time() - t0
+                    return (sym_code, False, dt, "netfail[%s](%drows until %s)" % (source, cache_rows, data_max))
+            else:
+                dt = time.time() - t0
+                return (sym_code, False, dt, "empty[%s]" % source)
+        except Exception as e:
+            dt = time.time() - t0
+            return (sym_code, False, dt, "%s[%s]: %s" % (type(e).__name__, source, str(e)[:80]))
+
+    # 字节采样线程
+    _byte_history.clear()
+    _byte_history.append((time.time(), 0))
+    def _sample_bytes():
+        while _preload_status["running"]:
+            _byte_history.append((time.time(), _scan_cache_bytes()))
+            if len(_byte_history) > 60:
+                _byte_history.pop(0)
+            time.sleep(2)
+    sampler = _th.Thread(target=_sample_bytes, daemon=True)
+    sampler.start()
+
+    # 3个源从共享队列动态抢任务，快的下完帮慢的继续
+    done = [0]
+    def _source_worker(source_name):
+        while _preload_status["running"]:
+            try:
+                sym = task_queue.get_nowait()
+            except _q.Empty:
+                break
+            code = sym[0]
+            sym_code, ok, dt, detail = _dl_one(code, source_name)
+            with _lock:
+                done[0] += 1
+                if ok:
+                    _preload_status["ok"] += 1
+                    msg = f"[{done[0]}/{total}] {sym_code} {detail} {dt:.1f}s"
+                else:
+                    _preload_status["fail"] += 1
+                    msg = f"[{done[0]}/{total}] {sym_code} FAIL {detail} {dt:.1f}s"
+                _preload_status["current"] = f"{done[0]}/{total} {sym_code}"
+                _preload_status["log"].append(msg)
+                _preload_status["log_count"] += 1
+                if len(_preload_status["log"]) > 200:
+                    _preload_status["log"] = _preload_status["log"][-100:]
+            task_queue.task_done()
+
+    threads = []
+    for src in SOURCES:
+        t = _th.Thread(target=_source_worker, args=(src,), daemon=True)
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+
+    csv_count = len([f for f in os.listdir(CACHE_DIR) if f.endswith(".csv")])
+    _preload_status["log"].append(f"[done] {stage_label}: ok={_preload_status['ok']} fail={_preload_status['fail']} csv={csv_count}")
+    _preload_status["log_count"] += 1
+    _preload_status["running"] = False
+    _preload_status["done"] = True
+
+
+def _scan_cache_bytes():
+    """直接扫描data_cache目录，返回实际总字节数"""
+    try:
+        return sum(os.path.getsize(os.path.join(CACHE_DIR, f))
+                   for f in os.listdir(CACHE_DIR) if f.endswith(".csv"))
+    except Exception:
+        return 0
+
+
+def _start_preload(scope="all"):
+    """启动预下载后台任务。"""
+    import threading
+    if _preload_status["running"]:
+        return {"ok": False, "error": "预下载正在进行中"}
+    _preload_status.update(running=True, done=False, total=0, ok=0, fail=0,
+                           current="", stage="", log=[], start_time=time.time(),
+                           start_bytes=_scan_cache_bytes())
+
+    symbols = []
+    if scope in ("all", "indices"):
+        symbols.extend(_PRELOAD_INDICES)
+        _preload_status["log"].append(f"[指数] {_PRELOAD_INDICES.__len__()}只")
+    if scope in ("all", "a500"):
+        a500 = get_a500_constituents()
+        if a500:
+            symbols.extend(a500)
+            _preload_status["log"].append(f"[A500] {len(a500)}只")
+    if scope in ("all", "sp500"):
+        sp500 = get_sp500_constituents()
+        if sp500:
+            symbols.extend(sp500)
+            _preload_status["log"].append(f"[标普500] {len(sp500)}只")
+    if scope in ("all", "hk"):
+        hk = get_hk_large_caps()
+        if hk:
+            symbols.extend(hk)
+            _preload_status["log"].append(f"[港股] {len(hk)}只")
+
+    if not symbols:
+        _preload_status["running"] = False
+        return {"ok": False, "error": "未获取到任何标的列表"}
+
+    _preload_status["total"] = len(symbols)
+    t = threading.Thread(target=_preload_worker, args=(symbols, f"预下载({scope})"), daemon=True)
+    t.start()
+    return {"ok": True, "total": len(symbols)}
+
+
+@app.route("/api/preload/start", methods=["POST"])
+def api_preload_start():
+    """启动预下载。body: {"scope": "all|indices|a500|sp500|hk"}"""
+    body = request.get_json(force=True) or {}
+    scope = str(body.get("scope", "all")).strip()
+    result = _start_preload(scope)
+    return jsonify(result)
+
+
+@app.route("/api/preload/stop", methods=["POST"])
+def api_preload_stop():
+    """停止预下载。"""
+    _preload_status["running"] = False
+    _preload_status["log"].append("[停止] 用户手动停止下载")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/preload/status")
+def api_preload_status():
+    """查询预下载进度。"""
+    elapsed = time.time() - _preload_status.get("start_time", 0) if _preload_status.get("running") else 0
+    total_bytes = _scan_cache_bytes()
+
+    # 滑动窗口计算实时速率：取15秒前的字节数，算差值
+    now = time.time()
+    speed_bps = 0
+    if len(_byte_history) >= 2:
+        target_t = now - 15.0  # 15秒前
+        prev_bytes = _byte_history[0][1]
+        for i in range(len(_byte_history) - 1, -1, -1):
+            if _byte_history[i][0] <= target_t:
+                prev_bytes = _byte_history[i][1]
+                break
+        cur_bytes = _byte_history[-1][1]
+        dt_recent = _byte_history[-1][0] - (target_t if _byte_history[0][0] <= target_t else _byte_history[0][0])
+        if dt_recent > 0:
+            speed_bps = (cur_bytes - prev_bytes) / dt_recent
+    # 如果实时速率为0但确实在下载，用平均速率兜底
+    start_bytes = _preload_status.get("start_bytes", 0)
+    if speed_bps <= 0 and _preload_status.get("running") and elapsed > 5 and total_bytes > start_bytes:
+        speed_bps = (total_bytes - start_bytes) / elapsed
+    if speed_bps > 1048576:
+        speed = "%.1f MB/s" % (speed_bps / 1048576)
+    elif speed_bps > 0:
+        speed = "%.0f KB/s" % (speed_bps / 1024)
+    else:
+        speed = "0 KB/s"
+
+    # 已下载总量
+    if total_bytes > 1073741824:
+        total_str = "%.1f GB" % (total_bytes / 1073741824)
+    elif total_bytes > 1048576:
+        total_str = "%.1f MB" % (total_bytes / 1048576)
+    elif total_bytes > 1024:
+        total_str = "%.0f KB" % (total_bytes / 1024)
+    else:
+        total_str = "%d B" % total_bytes
+    return jsonify({
+        "running": _preload_status["running"],
+        "done": _preload_status["done"],
+        "total": _preload_status["total"],
+        "ok": _preload_status["ok"],
+        "fail": _preload_status["fail"],
+        "current": _preload_status["current"],
+        "stage": _preload_status["stage"],
+        "elapsed": round(elapsed, 1),
+        "speed": speed,
+        "total_data": total_str,
+        "log": _preload_status["log"][-100:],
+        "log_total": _preload_status.get("log_count", 0),
+    })
 
 
 # ===== 反馈接口：把用户意见同步为 GitHub issue =====

@@ -201,10 +201,64 @@ def _fetch_ak_overseas(symbol: str, start: str, end: str, adjust: str) -> pd.Dat
     return pd.DataFrame()
 
 
-def _fetch(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
+def _fetch_em(symbol, start, end, adjust):
+    """东财 stock_zh_a_hist"""
+    import akshare as ak
+    s, e = start.replace("-", ""), end.replace("-", "")
+    df = _with_retry(lambda: ak.stock_zh_a_hist(
+        symbol=symbol, period="daily", start_date=s, end_date=e, adjust=adjust or ""))
+    return _norm_cols(df) if df is not None and not df.empty else pd.DataFrame()
+
+
+def _fetch_sina(symbol, start, end, adjust):
+    """新浪 stock_zh_a_daily (返回全历史，需手动截取)"""
+    import akshare as ak
+    prefix = "sz" if symbol.startswith(("0", "1", "2", "3")) else "sh"
+    sina_sym = prefix + symbol
+    df = _with_retry(lambda: ak.stock_zh_a_daily(symbol=sina_sym, adjust=adjust or ""))
+    if df is None or df.empty:
+        return pd.DataFrame()
+    keep = ["date", "open", "close", "high", "low", "volume"]
+    df = df[[c for c in keep if c in df.columns]].copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    for c in ["open", "close", "high", "low", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    mask = (df["date"] >= start) & (df["date"] <= end)
+    return df.loc[mask].sort_values("date").reset_index(drop=True)
+
+
+def _fetch_tx(symbol, start, end, adjust):
+    """腾讯 stock_zh_a_hist_tx"""
+    import akshare as ak
+    prefix = "sz" if symbol.startswith(("0", "1", "2", "3")) else "sh"
+    tx_sym = prefix + symbol
+    s, e = start.replace("-", ""), end.replace("-", "")
+    df = _with_retry(lambda: ak.stock_zh_a_hist_tx(
+        symbol=tx_sym, start_date=s, end_date=e, adjust=adjust or ""))
+    if df is None or df.empty:
+        return pd.DataFrame()
+    keep = ["date", "open", "close", "high", "low", "volume"]
+    df = df[[c for c in keep if c in df.columns]].copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    for c in ["open", "close", "high", "low", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+
+# A股个股数据源列表（按优先级）
+_A_SOURCES = [
+    ("em", _fetch_em),
+    ("sina", _fetch_sina),
+    ("tx", _fetch_tx),
+]
+
+
+def _fetch(symbol: str, start: str, end: str, adjust: str, source: str = None) -> pd.DataFrame:
     """拉取并标准化日线(列 date/open/close/high/low/volume)。
 
-    A股走 akshare(东财)；港股/美股走 yfinance(雅虎，快几十倍)。
+    source: 指定数据源 "em"/"sina"/"tx"，None=自动按优先级尝试。
     """
     code = str(symbol).strip()
     mkt = market_of(code)
@@ -214,12 +268,11 @@ def _fetch(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
         df = _fetch_yf(code, start, end)
         if df is not None and not df.empty:
             return df
-        # yfinance 取空(如恒生科技指数雅虎历史缺失) -> akshare 兜底
         return _fetch_ak_overseas(code, start, end, adjust)
 
-    import akshare as ak  # 延迟导入(仅A股需要)
+    import akshare as ak
 
-    # ---------- A股 ----------
+    # ---------- A股指数 ----------
     low = code.lower()
     if low.startswith("sh") or low.startswith("sz"):
         df = _with_retry(lambda: ak.stock_zh_index_daily_em(symbol=low))
@@ -232,20 +285,33 @@ def _fetch(symbol: str, start: str, end: str, adjust: str) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce")
         return df
 
-    s = start.replace("-", "")
-    e = end.replace("-", "")
-    df = _with_retry(lambda: ak.stock_zh_a_hist(
-        symbol=code, period="daily", start_date=s, end_date=e, adjust=adjust or "",
-    ))
-    return _norm_cols(df) if df is not None and not df.empty else pd.DataFrame()
+    # ---------- A股个股：多数据源 ----------
+    if source:
+        # 指定源，失败则回退到其他源
+        src_map = {s[0]: s[1] for s in _A_SOURCES}
+        ordered = [(source, src_map[source])] + [(n, f) for n, f in _A_SOURCES if n != source]
+    else:
+        ordered = _A_SOURCES
+
+    for src_name, fetch_fn in ordered:
+        try:
+            df = fetch_fn(code, start, end, adjust)
+            if df is not None and not df.empty:
+                return df
+        except Exception as ex:
+            print(f"[data] {src_name}取{code}失败: {type(ex).__name__}")
+    return pd.DataFrame()
 
 
 def load_kline(symbol: str, start: str, end: str,
-               adjust: str = "qfq", use_cache: bool = True) -> pd.DataFrame:
+               adjust: str = "qfq", use_cache: bool = True,
+               offline: bool = False, source: str = None) -> pd.DataFrame:
     """加载某只股票在 [start, end] 区间的日线数据。
 
     symbol: 6 位代码，如 '000001'（平安银行）、'600519'（贵州茅台）
     adjust: 'qfq' 前复权 / 'hfq' 后复权 / '' 不复权
+    offline: True=只读本地缓存不联网
+    source: 指定数据源 "em"/"sina"/"tx"，None=自动
     """
     symbol = str(symbol).strip()
     path = _cache_path(symbol, adjust)
@@ -283,9 +349,9 @@ def load_kline(symbol: str, start: str, end: str,
         except Exception:
             need_fetch = not (cmin <= start and cmax >= end)
 
-    if need_fetch:
+    if need_fetch and not offline:
         try:
-            fetched = _fetch(symbol, fetch_start, fetch_end, adjust)
+            fetched = _fetch(symbol, fetch_start, fetch_end, adjust, source=source)
         except Exception as e:
             # 联网失败：若有缓存则回退使用缓存，否则向上抛出
             if cache.empty:

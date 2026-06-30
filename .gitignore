@@ -14,13 +14,13 @@ data_cache/
 _deploy/
 
 # IDE / 工具
-.codebuddy/
 .idea/
 .vscode/
 .DS_Store
 
 # 日志
 *.log
+*.err
 
 # 敏感信息（token / 密钥，绝不入库）
 .env
@@ -29,5 +29,4 @@ _deploy/
 secrets/
 
 # 与项目无关的本地技能包/临时压缩包
-opend-skills.zip
 *.zip

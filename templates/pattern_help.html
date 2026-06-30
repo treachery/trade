@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>使用帮助 · 相似K线策略研究</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #0d1117; color: #c9d1d9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.7; font-size: 15px;
+    }
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      background: #161b22; border-bottom: 1px solid #2a2f37;
+      padding: 12px 18px; display: flex; align-items: center; justify-content: space-between;
+    }
+    .topbar h1 { font-size: 17px; margin: 0; color: #58a6ff; }
+    .back-btn {
+      background: #1f6feb; color: #fff; text-decoration: none;
+      padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    }
+    .back-btn:hover { background: #388bfd; }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 24px 18px 60px; }
+    h2 {
+      font-size: 20px; color: #e6edf3; margin: 30px 0 12px;
+      padding-bottom: 8px; border-bottom: 1px solid #21262d;
+    }
+    h3 { font-size: 16px; color: #58a6ff; margin: 20px 0 8px; }
+    h4 { font-size: 14px; color: #d29922; margin: 14px 0 6px; }
+    p { margin: 8px 0; }
+    ul, ol { margin: 8px 0; padding-left: 22px; }
+    li { margin: 5px 0; }
+    code {
+      background: #1b2027; color: #d29922; padding: 1px 6px;
+      border-radius: 4px; font-size: 13px; font-family: Consolas, Monaco, monospace;
+    }
+    pre {
+      background: #0a0d11; border: 1px solid #21262d; border-radius: 6px;
+      padding: 12px 14px; overflow-x: auto; font-size: 12.5px;
+      font-family: Consolas, Monaco, monospace; line-height: 1.55;
+    }
+    .card {
+      background: #161b22; border: 1px solid #21262d; border-radius: 10px;
+      padding: 14px 18px; margin: 12px 0;
+    }
+    .card.blue { border-left: 4px solid #58a6ff; }
+    .card.green { border-left: 4px solid #3fb950; }
+    .card.orange { border-left: 4px solid #d29922; }
+    .card.purple { border-left: 4px solid #a371f7; }
+    .note {
+      background: #1f6feb1a; border-left: 4px solid #1f6feb;
+      padding: 10px 14px; border-radius: 6px; margin: 14px 0; font-size: 14px;
+    }
+    .warn {
+      background: #d299221a; border-left: 4px solid #d29922;
+      padding: 10px 14px; border-radius: 6px; margin: 14px 0; font-size: 14px;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13.5px; }
+    th, td { border: 1px solid #21262d; padding: 7px 10px; text-align: left; vertical-align: top; }
+    th { background: #1b2027; color: #e6edf3; }
+    .steps { counter-reset: step; list-style: none; padding-left: 0; }
+    .steps > li {
+      position: relative; padding-left: 38px; margin: 14px 0; min-height: 28px;
+    }
+    .steps > li::before {
+      counter-increment: step; content: counter(step);
+      position: absolute; left: 0; top: 0;
+      width: 26px; height: 26px; border-radius: 50%;
+      background: #1f6feb; color: #fff; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; font-size: 14px;
+    }
+    .pipeline-flow {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+      margin: 12px 0; font-size: 13px;
+    }
+    .pipeline-flow .box {
+      background: #1b2027; border: 1px solid #30363d; padding: 6px 10px;
+      border-radius: 6px; color: #c9d1d9;
+    }
+    .pipeline-flow .arrow { color: #6e7681; font-weight: 700; }
+    .pipeline-flow .box.highlight { border-color: #3fb950; color: #3fb950; font-weight: 600; }
+    .toc {
+      background: #0f141a; border: 1px solid #21262d; border-radius: 8px;
+      padding: 12px 18px; margin-bottom: 20px;
+    }
+    .toc a { color: #58a6ff; text-decoration: none; margin-right: 14px; font-size: 13.5px; }
+    .toc a:hover { text-decoration: underline; }
+    .formula {
+      background: #0a0d11; border: 1px solid #30363d; border-radius: 6px;
+      padding: 8px 12px; margin: 8px 0; font-family: Consolas, monospace; font-size: 13px;
+    }
+    .formula b { color: #58a6ff; }
+    .kv-table td:first-child { color: #8b949e; width: 30%; }
+    .pos { color: #3fb950; }
+    .neg { color: #f85149; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>📘 使用帮助 · 相似K线策略研究</h1>
+    <a class="back-btn" href="/pattern-research">← 返回研究页面</a>
+  </div>
+
+  <div class="wrap">
+
+    <div class="toc">
+      <b style="color:#8b949e;font-size:13px">快速跳转：</b>
+      <a href="#usage">① 如何使用</a>
+      <a href="#params">② 参数 / 字段说明</a>
+      <a href="#arch">③ 架构与算法</a>
+    </div>
+
+    <p>这个工具的核心思路：<b>用今天的K线在历史上找最像的100条，看历史上那些"像今天"的时刻之后是怎么走的</b>，从而对未来给出统计上的判断。</p>
+
+    <!-- ======== ① 使用说明 ======== -->
+    <h2 id="usage">一、如何使用</h2>
+
+    <ol class="steps">
+      <li>
+        <b>选择查询标的</b>：填写要分析的代码（如 <code>sh000300</code> 沪深300、<code>600519</code> 茅台、<code>sh000016</code> 上证50）。这是你"想知道接下来怎么走"的标的。
+      </li>
+      <li>
+        <b>选择分析日期</b>（可选）：默认为最新交易日。也可以选历史某一天做回溯研究——比如选 2020-03-23 看当时疫情底像不像 2008 年底。
+      </li>
+      <li>
+        <b>填写参考标的</b>（可选）：用逗号分隔代码，如 <code>sh000001,sz399006,600519</code>。
+        留空则<b>默认用 A500 全部成分股</b>作为参考池（覆盖几十万个历史窗口，效果最好）。
+      </li>
+      <li>
+        <b>回溯年数</b>：参考池中每只股票回看几年历史。默认 5 年，可调到 3~15 年。年份越久，候选窗口越多但耗时越长。
+      </li>
+      <li>
+        <b>相似数</b>：前端展示几条最相似的片段。默认 10。
+        <span class="note" style="display:inline-block;margin:0;padding:4px 10px;font-size:12px">提示：策略评估实际会用 Top 100 来保证统计置信度，与展示数无关。</span>
+      </li>
+      <li>
+        <b>点「开始分析」</b>：等 10~60 秒（取决于参考池大小），即可看到三件事——
+        <ul>
+          <li><b>相似片段列表</b>（右侧）：Top N 的标的、日期、相似度、未来 5/10/20 日收益率</li>
+          <li><b>K线叠加图</b>（左侧）：所有相似片段叠加在查询K线上，可以勾选显示哪几条</li>
+          <li><b>策略评估</b>（底部）：在 Top 100 历史样本上跑 10 种交易策略，按稳健评分排序</li>
+        </ul>
+      </li>
+    </ol>
+
+    <div class="warn">
+      <b>⚠ 首次使用必读</b>：本工具默认<b>只读本地缓存</b>不会主动联网下载K线。如果参考池里某些股票没有缓存，会被自动跳过。
+      请先在主页点「预下载数据」拉取 A500 + 主要指数 10 年数据（约 200 MB，耗时 5~10 分钟）。
+    </div>
+
+    <h3>典型工作流</h3>
+
+    <div class="card blue">
+      <h4>场景 A：看今天的沪深300之后怎么走</h4>
+      <ol style="margin:6px 0 0 18px">
+        <li>标的：<code>sh000300</code></li>
+        <li>分析日期：留空（用最新）</li>
+        <li>参考标的：留空（用 A500，几十万候选窗口）</li>
+        <li>回溯年数：8（覆盖一个完整周期）</li>
+        <li>开始分析 → 看 Top 100 之后 20 日平均收益率、加权收益率（按 K 线相似度加权）</li>
+      </ol>
+    </div>
+
+    <div class="card green">
+      <h4>场景 B：研究个股相对自身历史</h4>
+      <ol style="margin:6px 0 0 18px">
+        <li>标的：<code>600519</code>（茅台）</li>
+        <li>参考标的：<code>600519</code>（只参考自己的历史）</li>
+        <li>回溯年数：15</li>
+        <li>结果会告诉你：茅台历史上类似的K线形态，后市的胜率和平均涨跌幅</li>
+      </ol>
+    </div>
+
+    <!-- ======== ② 参数说明 ======== -->
+    <h2 id="params">二、参数 / 字段说明</h2>
+
+    <h3>2.1 综合相似度评分</h3>
+    <p>每条相似片段会得到一个总分 <code>similarity ∈ [0, 1]</code>，越高越像。它由<b>三个维度加权</b>而成：</p>
+
+    <div class="formula">
+      <b>similarity</b> = <b>0.45</b> × shape_similarity + <b>0.40</b> × fit_similarity + <b>0.15</b> × signal_similarity
+    </div>
+
+    <table>
+      <thead>
+        <tr><th>维度</th><th>权重</th><th>衡量的是</th><th>不衡量</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><b style="color:#58a6ff">形态 shape</b></td>
+          <td>45%</td>
+          <td>走势曲线的<b>弯曲方向</b>像不像（先涨后跌、V反、横盘等）</td>
+          <td>幅度大小</td>
+        </tr>
+        <tr>
+          <td><b style="color:#3fb950">拟合 fit</b></td>
+          <td>40%</td>
+          <td>走势曲线的<b>实际幅度</b>贴不贴合（涨 5% 还是涨 50%）</td>
+          <td>局部细节</td>
+        </tr>
+        <tr>
+          <td><b style="color:#d29922">信号 signal</b></td>
+          <td>15%</td>
+          <td>锚定日前后是否触发<b>相同的技术信号</b>（突破/金叉/多头排列等）</td>
+          <td>走势细节</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h4>① 形态相似度 shape_similarity（45%）</h4>
+    <p>把 K 线"拉伸"到同样高度和宽度，比较曲线弯曲方向是否一致。哪怕一个涨 5%、一个涨 50%，只要弯曲过程像，shape_similarity 就高。</p>
+    <p><b>具体算法</b>：</p>
+    <ul>
+      <li>取查询点最近 5/10/20/30 日的<b>对数收益率</b>（<code>log(close[i]/close[today])</code>）</li>
+      <li>线性插值到固定点数（6/12/24/30 点）得到 4 个向量</li>
+      <li>对每个向量做 <b>z-score 标准化</b>（减均值除标准差）—— 这一步把"幅度差异"消除，只比较曲线本身的形状</li>
+      <li>用欧氏距离比较查询向量与候选向量</li>
+      <li>4 层距离按权重 <b>5日:40% / 10日:30% / 20日:20% / 30日:10%</b>（越近期越重）加权</li>
+      <li>转成 0~1 分：<code>shape_similarity = 1 / (1 + 加权距离)</code></li>
+    </ul>
+
+    <h4>② 拟合度 fit_similarity（40%）</h4>
+    <p>形态用了 z-score 标准化把幅度抹平，导致"两条都先涨后跌但一个 ±2% 一个 ±20%"会被判为很像。所以补一个<b>不被标准化抹平</b>的真实拟合度。</p>
+    <p><b>具体算法</b>：</p>
+    <ul>
+      <li>取<b>未标准化</b>的近 20 日对数收益率向量（24 个点）</li>
+      <li>计算 <b>RMSE</b>（均方根误差）：<code>sqrt(mean((q[i] - c[i])²))</code></li>
+      <li><b>rmse_pct</b> 就是它乘 100，<b>直接代表两条曲线在每个对应点平均偏差几个百分点</b></li>
+      <li>指数衰减映射到 0~1：<code>fit_similarity = exp(-rmse / 0.05)</code></li>
+    </ul>
+    <table class="kv-table">
+      <tr><td>rmse_pct = 1%</td><td>fit ≈ 0.82（几乎重叠）</td></tr>
+      <tr><td>rmse_pct = 2%</td><td>fit ≈ 0.67（很像）</td></tr>
+      <tr><td>rmse_pct = 5%</td><td>fit ≈ 0.37（一般）</td></tr>
+      <tr><td>rmse_pct = 10%</td><td>fit ≈ 0.14（明显走偏）</td></tr>
+    </table>
+
+    <h4>③ 信号相似度 signal_similarity（15%）</h4>
+    <p>锚定日<b>前后 ±2 天内（T-2 ~ T+2 共 5 天）</b>是否触发了相同的技术信号。考虑相邻几天是因为相同的信号经常在邻近交易日触发，太严格反而漏掉真正"像"的样本。</p>
+    <p>每个锚点都会算 <b>7 位二值信号</b>：</p>
+    <table>
+      <thead><tr><th>位</th><th>信号</th><th>触发条件</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>突破 20 日新高</td><td>今收 &gt; 前 20 日最高</td></tr>
+        <tr><td>1</td><td>突破 60 日新高</td><td>今收 &gt; 前 60 日最高</td></tr>
+        <tr><td>2</td><td>突破 120 日新高</td><td>今收 &gt; 前 120 日最高</td></tr>
+        <tr><td>3</td><td>突破布林上轨</td><td>今收 &gt; MA20 + 2σ</td></tr>
+        <tr><td>4</td><td>量价突破</td><td>突破20日新高 且 成交量 &gt; 1.5×均量</td></tr>
+        <tr><td>5</td><td>MA20 金叉 MA60</td><td>昨日 MA20≤MA60、今日 MA20&gt;MA60</td></tr>
+        <tr><td>6</td><td>多头排列</td><td>MA5 &gt; MA10 &gt; MA20 &gt; MA60 且 收盘 &gt; MA5</td></tr>
+      </tbody>
+    </table>
+    <p><b>Jaccard 相似度</b>：</p>
+    <div class="formula">signal_similarity = (两边都触发的信号数) / (任一方触发的信号数)</div>
+    <ul>
+      <li>都触发{突破20日新高 + 多头排列} → <b>1.0</b></li>
+      <li>查询触发{0,6}，候选触发{0,3,6} → 2/3 ≈ <b>0.67</b></li>
+      <li>查询锚点附近无任何信号 → 退化为 <b>0.5</b>（不压制形态评分）</li>
+    </ul>
+
+    <h3>2.2 相似片段列表字段</h3>
+    <table class="kv-table">
+      <tr><td><code>rank</code></td><td>综合评分排名</td></tr>
+      <tr><td><code>symbol</code></td><td>历史相似片段所属标的</td></tr>
+      <tr><td><code>anchor_date</code></td><td>锚定日（对应"今天"的那个历史日子）</td></tr>
+      <tr><td><code>similarity</code></td><td>综合相似度 0~1（45%形态 + 40%拟合 + 15%信号）</td></tr>
+      <tr><td><code>shape_similarity</code> / <code>fit_similarity</code> / <code>signal_similarity</code></td><td>三个分项</td></tr>
+      <tr><td><code>rmse_pct</code></td><td>20日对数收益率的 RMSE，% 表示。&lt; 1% 算非常拟合，&gt; 5% 偏差大</td></tr>
+      <tr><td><code>fwd_returns.r_5d/r_10d/r_20d/r_40d/r_60d</code></td><td>锚定日之后 N 日的收益率（用于"未来怎么走"的统计）</td></tr>
+      <tr><td><code>fwd_returns.max_drawdown</code></td><td>锚定日之后 60 日内的最大回撤</td></tr>
+    </table>
+
+    <h3>2.3 策略评估字段</h3>
+    <p>在 Top 100 个相似历史片段上分别跑 10 种策略，每种都给出统计指标：</p>
+    <table class="kv-table">
+      <tr><td><code>sample_count</code></td><td>有效样本数（一般 = 100）</td></tr>
+      <tr><td><code>mean_return</code></td><td>策略平均收益率（等权）</td></tr>
+      <tr><td><code>weighted_mean_return</code> ⭐</td><td><b>按 K 线相似度加权</b>的平均收益率（相似度高的样本权重更大，更贴近"最像的样本说了算"）</td></tr>
+      <tr><td><code>median_return</code></td><td>中位数收益率（抗异常值）</td></tr>
+      <tr><td><code>win_rate</code> / <code>weighted_win_rate</code></td><td>胜率 / 加权胜率</td></tr>
+      <tr><td><code>profit_loss_ratio</code></td><td>盈亏比 = 平均盈利 / 平均亏损</td></tr>
+      <tr><td><code>worst_quantile_20</code></td><td>最差 20% 分位收益（尾部风险）</td></tr>
+      <tr><td><code>max_drawdown</code></td><td>策略累积收益曲线的最大回撤</td></tr>
+      <tr><td><code>sharpe</code></td><td>年化夏普比率（收益/波动）</td></tr>
+      <tr><td><code>calmar</code></td><td>卡玛比率（中位数收益/最大回撤）</td></tr>
+      <tr><td><code>bootstrap_lower</code> / <code>bootstrap_upper</code></td><td>Bootstrap 1000 次重采样得到的均值 95% 置信区间</td></tr>
+      <tr><td><code>robust_score</code></td><td>多目标稳健评分（综合中位收益/胜率/盈亏比/尾部风险/卡玛/Bootstrap稳定性）</td></tr>
+      <tr><td><code>confidence</code></td><td>置信度等级 HIGH / MED / LOW（按样本数分级）</td></tr>
+    </table>
+
+    <h3>2.4 候选策略库（10 种）</h3>
+    <table>
+      <thead><tr><th>ID</th><th>名称</th><th>类别</th><th>逻辑</th></tr></thead>
+      <tbody>
+        <tr><td>DIR-5</td><td>信号后持有5日</td><td>direct</td><td>信号次日开盘买入，5日后卖出</td></tr>
+        <tr><td>DIR-10</td><td>信号后持有10日</td><td>direct</td><td>同上，持有10日</td></tr>
+        <tr><td>DIR-20</td><td>信号后持有20日</td><td>direct</td><td>同上，持有20日</td></tr>
+        <tr><td>DIR-60</td><td>信号后持有60日</td><td>direct</td><td>同上，持有60日</td></tr>
+        <tr><td>SL-5</td><td>持有20日+5%止损</td><td>risk</td><td>20日内若亏损5%立即出场</td></tr>
+        <tr><td>SL-8</td><td>持有20日+8%止损</td><td>risk</td><td>20日内若亏损8%立即出场</td></tr>
+        <tr><td>TRAIL-5</td><td>持有20日+5%移动止盈</td><td>risk</td><td>从最高点回撤5%出场</td></tr>
+        <tr><td>TRAIL-10</td><td>持有40日+10%移动止盈</td><td>risk</td><td>持有期 40 日，回撤 10% 出场</td></tr>
+        <tr><td>TIME-10</td><td>持有至10日不涨即出</td><td>risk</td><td>10日时若仍亏损则提前出</td></tr>
+        <tr><td>BUYHOLD-60</td><td>买入持有60日</td><td>benchmark</td><td>基准对照</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ======== ③ 架构与算法 ======== -->
+    <h2 id="arch">三、架构与算法</h2>
+
+    <h3>3.1 整体管线</h3>
+    <div class="pipeline-flow">
+      <span class="box">① 信号侦测</span>
+      <span class="arrow">→</span>
+      <span class="box">② 加载参考池</span>
+      <span class="arrow">→</span>
+      <span class="box">③ 切片建库</span>
+      <span class="arrow">→</span>
+      <span class="box highlight">④ 四级递进检索</span>
+      <span class="arrow">→</span>
+      <span class="box highlight">⑤ 综合评分</span>
+      <span class="arrow">→</span>
+      <span class="box">⑥ 策略评估</span>
+    </div>
+
+    <h3>3.2 切片建库（Slicer）</h3>
+    <p>把每只股票的 N 年历史按<b>滑动窗口</b>切成无数小片段，每片段提取多个特征向量：</p>
+    <ul>
+      <li><b>滑窗参数</b>：窗口长 250 日，步长 <b>1 日</b>（每个交易日都作为一个锚点，最大化候选量）</li>
+      <li><b>规模</b>：500 股 × 6 年 ≈ <b>75 万个候选窗口</b></li>
+      <li><b>每个锚点提取的特征</b>：
+        <ul>
+          <li>形态向量：5/10/20/30 日的对数收益率插值（4 个长度，KNN 用）</li>
+          <li>技术向量：t20/t40/t60（短中长期收益率、波动率、ma 偏离等）</li>
+          <li>信号位向量：7 位二值（突破/金叉/排列），用 T-2 ~ T+2 窗口聚合</li>
+        </ul>
+      </li>
+      <li><b>并行化</b>：用 ProcessPoolExecutor 真正多核并行（绕过 Python GIL），向量化批处理 numpy；64 核机器可同时处理 64 只股票</li>
+      <li><b>内存优化</b>：所有特征用 float32 矩阵存储（不存 OHLC，最后 Top-N 才回填，避免 3GB+ 内存爆炸）</li>
+    </ul>
+
+    <h3>3.3 四级递进检索（核心）</h3>
+    <p>为什么要"递进"？— 因为在 75 万候选里直接算 30 天形态相似度太慢且不必要。我们用<b>由短及长</b>的递进过滤：</p>
+
+    <table>
+      <thead>
+        <tr><th>层级</th><th>形态向量</th><th>采样点</th><th>输入候选</th><th>输出 top</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Layer 1</td><td>近 5 日形态</td><td>6 点</td><td>~750,000</td><td><b>10,000</b></td></tr>
+        <tr><td>Layer 2</td><td>近 10 日形态</td><td>12 点</td><td>10,000</td><td><b>1,000</b></td></tr>
+        <tr><td>Layer 3</td><td>近 20 日形态</td><td>24 点</td><td>1,000</td><td><b>100</b></td></tr>
+        <tr><td>Layer 4</td><td>近 30 日形态</td><td>30 点</td><td>100</td><td><b>50</b></td></tr>
+        <tr><td>最终评分</td><td>形态+拟合+信号</td><td>-</td><td>50</td><td><b>Top K</b></td></tr>
+      </tbody>
+    </table>
+
+    <p><b>原理</b>：先找"最近 5 天最像"的 10000 条 → 再从里面找"最近 10 天最像"的 1000 条 → 以此类推。每层都是上一层的子集，越往后样本越精。</p>
+
+    <div class="note">
+      <b>设计取舍</b>：为什么不直接对 30 天形态做一次 KNN？
+      <ul style="margin:4px 0 0 18px">
+        <li>第一层用短形态过滤，能保留"最近几天走势像"的样本（你最关心的）</li>
+        <li>渐进式剪枝让计算量从 O(M × 30) 降到 O(M × 5 + 10000 × 10 + ...) ≈ <b>快 5~10 倍</b></li>
+        <li>而且对最终用户来说，"近5日很像 + 近30日大致像"比"30日总体像但近5日不像"更有参考价值</li>
+      </ul>
+    </div>
+
+    <h3>3.4 综合评分（在 Top 50 上重排）</h3>
+    <div class="formula">
+      shape_distance = 0.4×d(shape5) + 0.3×d(shape10) + 0.2×d(shape20) + 0.1×d(shape30)<br>
+      shape_similarity = 1 / (1 + shape_distance)<br>
+      fit_similarity = exp(-rmse / 0.05)<br>
+      signal_similarity = Jaccard(q_sig, c_sig)<br>
+      <b>similarity = 0.45 × shape + 0.40 × fit + 0.15 × signal</b>
+    </div>
+
+    <h3>3.5 策略评估</h3>
+    <p>对 Top 100 历史片段做"如果当时按 X 策略交易，最后赚多少"的回放：</p>
+    <ol>
+      <li>每个相似片段 → 模拟"信号次日开盘买入"</li>
+      <li>按各策略的出场逻辑（固定持有 / 止损 / 移动止盈等）逐日模拟</li>
+      <li>统计 100 个样本的收益分布：均值/中位/胜率/盈亏比/最大回撤/夏普/卡玛</li>
+      <li>Bootstrap 重采样 1000 次得到均值 95% 置信区间</li>
+      <li><b>新增</b>：用每个片段的 K 线相似度作为权重做加权平均（更像的样本占主导）</li>
+      <li>按 robust_score 排序，给出推荐策略</li>
+    </ol>
+
+    <h3>3.6 性能数据（参考）</h3>
+    <table>
+      <thead><tr><th>规模</th><th>候选窗口</th><th>耗时（64核机器）</th></tr></thead>
+      <tbody>
+        <tr><td>10 只股票 × 5 年</td><td>~8,000</td><td>1~2 秒</td></tr>
+        <tr><td>100 只股票 × 6 年</td><td>~150,000</td><td>5~10 秒</td></tr>
+        <tr><td>A500 × 6 年</td><td>~750,000</td><td>20~60 秒</td></tr>
+        <tr><td>A500 × 10 年</td><td>~1,250,000</td><td>40~120 秒</td></tr>
+      </tbody>
+    </table>
+
+    <h3>3.7 数据来源 & 缓存</h3>
+    <ul>
+      <li>K 线数据来自新浪 / 腾讯 / 东方财富，存为本地 CSV 缓存（<code>data_cache/</code>）</li>
+      <li>本工具<b>默认不联网</b>，只读缓存。请先用主页「预下载数据」拉取所需数据</li>
+      <li>缓存按 <code>{symbol}_{qfq|hfq}.csv</code> 命名，单只股票 10 年约 200 KB</li>
+    </ul>
+
+    <div class="warn" style="margin-top:30px">
+      <b>⚠ 重要提醒</b>：相似K线统计仅供研究参考，不构成投资建议。"像"只是历史相关性，市场环境变化可能让历史规律失效。请独立判断风险。
+    </div>
+
+  </div>
+</body>
+</html>

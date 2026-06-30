@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>相似K线策略研究</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1419;color:#e6e6e6;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;font-size:13px}
+.topbar{background:#161b22;border-bottom:1px solid #2a2f37;padding:8px 16px;display:flex;align-items:center;justify-content:space-between}
+.topbar h1{font-size:15px;color:#58a6ff;display:flex;align-items:center;gap:8px}
+.help-btn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:#1f6feb33;color:#58a6ff;border:1px solid #1f6feb55;font-size:12px;font-weight:700;text-decoration:none;cursor:pointer;transition:all 0.15s}
+.help-btn:hover{background:#1f6feb;color:#fff;transform:scale(1.1)}
+.back-btn{background:#1f6feb;color:#fff;text-decoration:none;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600}
+.wrap{max-width:1400px;margin:0 auto;padding:10px 14px 40px}
+.config-bar{background:#161b22;border:1px solid #2a2f37;border-radius:8px;padding:8px 12px;margin-bottom:8px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+.config-bar .field{display:flex;flex-direction:column;gap:2px}
+.config-bar label{font-size:10px;color:#8b949e}
+.config-bar input,.config-bar select{padding:5px 7px;background:#0d1117;border:1px solid #30363d;border-radius:5px;color:#e6e6e6;font-size:12px}
+.config-bar input{width:110px} .config-bar #refSymbols{width:200px}
+button{font-family:inherit;cursor:pointer;border:none;border-radius:5px;font-weight:600;font-size:12px}
+.btn-primary{padding:6px 16px;background:#238636;color:#fff}.btn-primary:hover{background:#2ea043}.btn-primary:disabled{background:#30363d;cursor:not-allowed}
+.btn-sec{padding:6px 12px;background:#21262d;color:#8b949e;border:1px solid #30363d}.btn-sec:hover{color:#c9d1d9}
+
+#logPanel{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:10px;font-family:Consolas,monospace;color:#6e7681;max-height:120px;overflow-y:auto;display:none}
+#logPanel.show{display:block}.log-ok{color:#3fb950}.log-err{color:#f85149}.log-warn{color:#d29922}
+
+.main-grid{display:grid;grid-template-columns:1fr 310px;gap:8px}
+@media(max-width:1100px){.main-grid{grid-template-columns:1fr}}
+
+.chart-box{background:#161b22;border:1px solid #2a2f37;border-radius:8px;padding:8px}
+.chart-box h3{font-size:12px;color:#8b949e;margin-bottom:4px}
+#klineCanvas{width:100%;background:#0d1117;border-radius:4px;display:block}
+
+.sim-panel{background:#161b22;border:1px solid #2a2f37;border-radius:8px;padding:8px;max-height:550px;overflow-y:auto}
+.sim-panel h3{font-size:13px;color:#58a6ff;margin-bottom:6px}
+.pipeline{display:flex;gap:3px;flex-wrap:wrap;margin-bottom:8px;font-size:10px;color:#6e7681}
+.pipeline span{background:#21262d;padding:2px 6px;border-radius:3px}
+.sim-item{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:6px 8px;margin-bottom:5px}
+.sim-item .sim-head{display:flex;justify-content:space-between;align-items:center}
+.sim-item .sim-code{font-size:13px;font-weight:700;color:#e6edf3}
+.sim-item .sim-sim{font-size:12px;font-weight:700}
+.sim-item .sim-date{font-size:10px;color:#6e7681;margin:2px 0}
+.sim-item .sim-ret{font-size:10px;display:flex;gap:6px}
+.sim-item .sim-act{display:flex;gap:6px;margin-top:4px;align-items:center}
+.sim-item .sim-act label{font-size:10px;color:#8b949e;display:flex;align-items:center;gap:3px;cursor:pointer}
+.sim-item .sim-act input[type=checkbox]{accent-color:#58a6ff}
+.sim-item .sim-act .btn-fwd{font-size:9px;padding:2px 6px;background:#1f6feb22;color:#58a6ff;border:1px solid #1f6feb55;border-radius:3px;cursor:pointer}
+.pos{color:#3fb950}.neg{color:#f85149}
+
+.eval-panel{background:#161b22;border:1px solid #2a2f37;border-radius:8px;padding:8px;margin-top:8px}
+.eval-panel summary{font-size:13px;color:#58a6ff;font-weight:600;cursor:pointer;padding:4px 0}
+.eval-panel table{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px}
+.eval-panel th{text-align:left;padding:4px 5px;background:#0d1117;color:#8b949e}
+.eval-panel td{padding:4px 5px;border-bottom:1px solid #21262d}
+.eval-panel tr.best{background:#23863611}
+.error-box{background:#f851491a;border:1px solid #f8514955;border-radius:6px;padding:8px 12px;color:#f85149;margin-bottom:8px;display:none}.error-box.show{display:block}
+</style></head><body>
+
+<div class="topbar"><h1>相似K线策略研究<a class="help-btn" href="/pattern-help" target="_blank" title="使用帮助 / 参数说明 / 架构原理">?</a></h1><a class="back-btn" href="/">返回</a></div>
+<div class="wrap">
+
+<div id="logPanel"><div id="logContent"></div></div>
+<script>
+window.onerror = function (msg, url, line, col, err) {
+  var lc = document.getElementById("logContent");
+  if (lc) {
+    lc.innerHTML += '<div class="log-err">[JS ERROR] ' + msg + ' (line ' + line + ')</div>';
+  }
+  var lp = document.getElementById("logPanel");
+  if (lp) lp.classList.add("show");
+  return false;
+};
+console.error = function () {
+  var args = Array.prototype.slice.call(arguments);
+  var lc = document.getElementById("logContent");
+  if (lc) {
+    lc.innerHTML += '<div class="log-err">[CONSOLE] ' + args.join(" ") + '</div>';
+  }
+  var lp = document.getElementById("logPanel");
+  if (lp) lp.classList.add("show");
+};
+</script>
+
+<div class="config-bar">
+  <div class="field"><label>标的代码</label><input id="symbol" value="sh000300"/></div>
+  <div class="field"><label>分析日期</label><input id="asOfDate" type="date"/></div>
+  <div class="field"><label>参考标的(逗号分隔)</label><input id="refSymbols" value="sh000001,sz399001,sz399006,sh000016,000001" placeholder="为空则用A500"/></div>
+  <div class="field"><label>回溯(年)</label><input id="lb" type="number" value="5" min="3" max="15" style="width:60px"/></div>
+  <div class="field"><label>相似数</label><input id="topK" type="number" value="8" min="3" max="20" style="width:60px"/></div>
+  <button class="btn-primary" id="analyzeBtn" onclick="app.analyze()">开始分析</button>
+  <button class="btn-sec" onclick="app.showOnlyMe()">仅看当前</button>
+  <button class="btn-sec" id="preloadBtn" onclick="app.preload()">预下载数据</button>
+</div>
+
+<div class="error-box" id="errorBox"></div>
+<div id="errModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;justify-content:center;align-items:center">
+  <div style="background:#161b22;border:1px solid #f85149;border-radius:10px;padding:20px;max-width:500px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+    <div style="color:#f85149;font-size:15px;font-weight:700;margin-bottom:10px">&#9888; 发生错误</div>
+    <div id="errModalMsg" style="color:#e6e6e6;font-size:13px;line-height:1.6;white-space:pre-wrap;max-height:300px;overflow-y:auto;background:#0d1117;padding:10px;border-radius:6px;margin-bottom:12px"></div>
+    <button onclick="document.getElementById('errModal').style.display='none'" style="padding:6px 20px;background:#238636;color:#fff;border:none;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px">知道了</button>
+  </div>
+</div>
+<div id="results" style="display:none">
+  <div class="main-grid">
+    <div class="chart-box">
+      <h3 id="chartTitle"></h3>
+      <canvas id="klineCanvas" width="800" height="480"></canvas>
+    </div>
+    <div class="sim-panel">
+      <h3>相似片段</h3>
+      <div class="pipeline" id="pipeline"></div>
+      <div id="simList"></div>
+    </div>
+  </div>
+  <details class="eval-panel" id="evalDetail">
+    <summary>策略评估</summary>
+    <canvas id="evalBoxplot" width="700" height="280" style="width:100%;margin-bottom:8px"></canvas>
+    <div id="evalContent"></div>
+  </details>
+</div>
+
+</div>
+<script>
+var _s = document.createElement('script');
+_s.src = '/static/pattern.js?v=' + Date.now();
+document.head.appendChild(_s);
+</script>
+</body></html>
