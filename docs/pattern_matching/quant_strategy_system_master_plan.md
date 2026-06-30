@@ -922,6 +922,12 @@ T+N+1 起：信号进入衰减期（提高确认门槛）
 ### 7.1 核心业务表 ER 关系
 
 ```mermaid
+---
+config:
+  look: neo
+  theme: redux
+  layout: dagre
+---
 erDiagram
     securities ||--o{ daily_bars : "1:N"
     securities ||--o{ index_membership : "1:N"
@@ -954,29 +960,29 @@ erDiagram
     }
 
     daily_bars {
-        string symbol PK_FK
-        date date PK
+        string symbol PK
+        date trade_date PK
         float open
         float high
         float low
         float close
         float volume
         float adj_factor
-        bool is_suspended
+        boolean is_suspended
         float limit_up_price
         float limit_down_price
     }
 
     index_membership {
         string index_code PK
-        string symbol PK_FK
+        string symbol PK
         date effective_from PK
         date effective_to
     }
 
     signal_events {
         string event_id PK
-        string symbol FK
+        string symbol
         date signal_date
         string signal_type
         string signal_direction
@@ -986,17 +992,17 @@ erDiagram
 
     pattern_windows {
         string window_id PK
-        string symbol FK
+        string symbol
         date anchor_date
         int lookback_days
         int forward_days
-        blob feature_vector
-        bool is_forward_window_complete
+        string feature_vector
+        boolean is_forward_window_complete
     }
 
     strategy_evaluations {
-        string query_event_id PK_FK
-        string strategy_id PK_FK
+        string query_event_id PK
+        string strategy_id PK
         int sample_count
         float median_return
         float win_rate
@@ -1013,7 +1019,7 @@ erDiagram
     }
 
     simulation_trade_details {
-        string run_id PK_FK
+        string run_id PK
         string trade_id PK
         string symbol
         date entry_date
@@ -1317,6 +1323,12 @@ erDiagram
 ### 总体时间线
 
 ```mermaid
+---
+config:
+  look: neo
+  theme: redux
+  layout: dagre
+---
 gantt
     title 系统实施路线图
     dateFormat  YYYY-MM
